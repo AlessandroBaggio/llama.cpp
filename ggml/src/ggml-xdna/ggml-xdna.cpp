@@ -2,6 +2,7 @@
 
 #include "ggml-backend-impl.h"
 
+#include <xrt/xrt_bo.h>
 #include <xrt/xrt_device.h>
 #include <xrt/xrt_hw_context.h>
 #include <xrt/xrt_kernel.h>
@@ -9,6 +10,8 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdio>
+#include <cstdint>
+#include <cstring>
 #include <exception>
 #include <memory>
 #include <string>
@@ -233,6 +236,135 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
     return GGML_STATUS_FAILED;
 }
 
+static bool ggml_backend_xdna_run_i16_matmul(
+        ggml_backend_t backend,
+        const uint32_t * instructions,
+        uint32_t instruction_count,
+        const int16_t * a,
+        size_t a_elements,
+        const int16_t * b,
+        size_t b_elements,
+        int16_t * c,
+        size_t c_elements) {
+    if (backend == nullptr ||
+        instructions == nullptr ||
+        instruction_count == 0 ||
+        a == nullptr ||
+        a_elements == 0 ||
+        b == nullptr ||
+        b_elements == 0 ||
+        c == nullptr ||
+        c_elements == 0) {
+        std::fprintf(stderr, "ggml_xdna: invalid i16 matmul arguments\n");
+        return false;
+    }
+
+    auto * ctx =
+        static_cast<ggml_backend_xdna_backend_context *>(backend->context);
+
+    if (ctx == nullptr ||
+        ctx->device_context == nullptr ||
+        ctx->device_context->xrt_device == nullptr ||
+        ctx->kernel == nullptr) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: i16 matmul requires an initialized XRT kernel\n");
+        return false;
+    }
+
+    try {
+        xrt::device & device =
+            *ctx->device_context->xrt_device;
+
+        xrt::kernel & kernel =
+            *ctx->kernel;
+
+        xrt::bo bo_instr(
+            device,
+            static_cast<size_t>(instruction_count) * sizeof(uint32_t),
+            XCL_BO_FLAGS_CACHEABLE,
+            kernel.group_id(1));
+
+        xrt::bo bo_a(
+            device,
+            a_elements * sizeof(int16_t),
+            XRT_BO_FLAGS_HOST_ONLY,
+            kernel.group_id(3));
+
+        xrt::bo bo_b(
+            device,
+            b_elements * sizeof(int16_t),
+            XRT_BO_FLAGS_HOST_ONLY,
+            kernel.group_id(4));
+
+        xrt::bo bo_c(
+            device,
+            c_elements * sizeof(int16_t),
+            XRT_BO_FLAGS_HOST_ONLY,
+            kernel.group_id(5));
+
+        void * buf_instr = bo_instr.map<void *>();
+        std::memcpy(
+            buf_instr,
+            instructions,
+            static_cast<size_t>(instruction_count) * sizeof(uint32_t));
+        bo_instr.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+
+        int16_t * buf_a = bo_a.map<int16_t *>();
+        std::memcpy(
+            buf_a,
+            a,
+            a_elements * sizeof(int16_t));
+        bo_a.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+
+        int16_t * buf_b = bo_b.map<int16_t *>();
+        std::memcpy(
+            buf_b,
+            b,
+            b_elements * sizeof(int16_t));
+        bo_b.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+
+        int16_t * buf_c = bo_c.map<int16_t *>();
+        std::memset(
+            buf_c,
+            0,
+            c_elements * sizeof(int16_t));
+        bo_c.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+
+        constexpr unsigned int opcode = 3;
+
+        auto run = kernel(
+            opcode,
+            bo_instr,
+            instruction_count,
+            bo_a,
+            bo_b,
+            bo_c);
+
+        run.wait();
+
+        bo_c.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
+
+        std::memcpy(
+            c,
+            buf_c,
+            c_elements * sizeof(int16_t));
+
+        return true;
+    } catch (const std::exception & e) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: i16 matmul execution failed: %s\n",
+            e.what());
+        return false;
+    } catch (...) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: i16 matmul execution failed: unknown error\n");
+        return false;
+    }
+}
+
 static struct ggml_backend_i ggml_backend_xdna_i = {
     /* .get_name                = */ ggml_backend_xdna_get_name,
     /* .free                    = */ ggml_backend_xdna_free,
@@ -363,7 +495,12 @@ static void * ggml_backend_xdna_reg_get_proc_address(
         ggml_backend_reg_t reg,
         const char * name) {
     (void) reg;
-    (void) name;
+
+    if (name != nullptr &&
+        std::strcmp(name, "ggml_backend_xdna_run_i16_matmul") == 0) {
+        return (void *) ggml_backend_xdna_run_i16_matmul;
+    }
+
     return nullptr;
 }
 
