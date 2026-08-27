@@ -689,9 +689,21 @@ static ggml_backend_t ggml_backend_xdna_device_init(
     };
 }
 
-static ggml_backend_buffer_type_t ggml_backend_xdna_device_get_buffer_type(ggml_backend_dev_t dev) {
+static ggml_backend_buffer_type_t ggml_backend_xdna_device_get_buffer_type(
+        ggml_backend_dev_t dev) {
     (void) dev;
-    return nullptr;
+    return ggml_backend_cpu_buffer_type();
+}
+
+static ggml_backend_buffer_t ggml_backend_xdna_device_buffer_from_host_ptr(
+        ggml_backend_dev_t dev,
+        void * ptr,
+        size_t size,
+        size_t max_tensor_size) {
+    (void) dev;
+    (void) max_tensor_size;
+
+    return ggml_backend_cpu_buffer_from_ptr(ptr, size);
 }
 
 static bool ggml_backend_xdna_device_supports_op(
@@ -699,6 +711,9 @@ static bool ggml_backend_xdna_device_supports_op(
         const struct ggml_tensor * op) {
     (void) dev;
     (void) op;
+
+    // Keep scheduler offload disabled until XDNA supports
+    // general GGML operation semantics.
     return false;
 }
 
@@ -706,8 +721,8 @@ static bool ggml_backend_xdna_device_supports_buft(
         ggml_backend_dev_t dev,
         ggml_backend_buffer_type_t buft) {
     (void) dev;
-    (void) buft;
-    return false;
+
+    return buft != nullptr && ggml_backend_buft_is_host(buft);
 }
 
 static const struct ggml_backend_device_i ggml_backend_xdna_device_i = {
@@ -719,7 +734,7 @@ static const struct ggml_backend_device_i ggml_backend_xdna_device_i = {
     /* .init_backend         = */ ggml_backend_xdna_device_init,
     /* .get_buffer_type      = */ ggml_backend_xdna_device_get_buffer_type,
     /* .get_host_buffer_type = */ nullptr,
-    /* .buffer_from_host_ptr = */ nullptr,
+    /* .buffer_from_host_ptr = */ ggml_backend_xdna_device_buffer_from_host_ptr,
     /* .supports_op          = */ ggml_backend_xdna_device_supports_op,
     /* .supports_buft        = */ ggml_backend_xdna_device_supports_buft,
     /* .offload_op           = */ nullptr,
