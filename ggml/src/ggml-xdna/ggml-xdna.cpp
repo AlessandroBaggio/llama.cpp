@@ -13,8 +13,11 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
+#include <vector>
 
 struct ggml_backend_xdna_context {
     std::unique_ptr<xrt::device> xrt_device;
@@ -26,6 +29,9 @@ struct ggml_backend_xdna_backend_context {
     ggml_backend_xdna_context * device_context = nullptr;
 
     std::string xclbin_path;
+    std::string instructions_path;
+    std::vector<uint32_t> instructions;
+
     std::string kernel_name = "MLIR_AIE";
 
     std::unique_ptr<xrt::xclbin> xclbin;
@@ -209,6 +215,93 @@ static bool ggml_backend_xdna_init_kernel(
     }
 }
 
+static bool ggml_backend_xdna_load_instructions(
+        ggml_backend_xdna_backend_context * ctx) {
+    if (ctx == nullptr) {
+        return false;
+    }
+
+    if (!ctx->instructions.empty()) {
+        return true;
+    }
+
+    if (ctx->xclbin_path.empty()) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: cannot load instructions without an XCLBIN path\n");
+        return false;
+    }
+
+    try {
+        const std::filesystem::path xclbin_path(ctx->xclbin_path);
+        const std::filesystem::path instructions_path =
+            xclbin_path.parent_path() / "insts.bin";
+
+        ctx->instructions_path = instructions_path.string();
+
+        std::ifstream file(
+            instructions_path,
+            std::ios::binary | std::ios::ate);
+
+        if (!file) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: failed to open instruction file: %s\n",
+                ctx->instructions_path.c_str());
+            return false;
+        }
+
+        const std::streamsize size = file.tellg();
+
+        if (size <= 0 ||
+            size % static_cast<std::streamsize>(sizeof(uint32_t)) != 0) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: invalid instruction file size: %s\n",
+                ctx->instructions_path.c_str());
+            return false;
+        }
+
+        ctx->instructions.resize(
+            static_cast<size_t>(size) / sizeof(uint32_t));
+
+        file.seekg(0, std::ios::beg);
+
+        if (!file.read(
+                reinterpret_cast<char *>(ctx->instructions.data()),
+                size)) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: failed to read instruction file: %s\n",
+                ctx->instructions_path.c_str());
+
+            ctx->instructions.clear();
+            return false;
+        }
+
+        std::fprintf(
+            stderr,
+            "ggml_xdna: loaded %zu instruction words from %s\n",
+            ctx->instructions.size(),
+            ctx->instructions_path.c_str());
+
+        return true;
+    } catch (const std::exception & e) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: failed to load instructions: %s\n",
+            e.what());
+        ctx->instructions.clear();
+        return false;
+    } catch (...) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: failed to load instructions: unknown error\n");
+        ctx->instructions.clear();
+        return false;
+    }
+}
+
 // backend interface
 
 static const char * ggml_backend_xdna_get_name(ggml_backend_t backend) {
@@ -226,14 +319,187 @@ static void ggml_backend_xdna_free(ggml_backend_t backend) {
     delete backend;
 }
 
+static bool ggml_backend_xdna_run_i16_matmul(
+        ggml_backend_t backend,
+        const uint32_t * instructions,
+        uint32_t instruction_count,
+        const int16_t * a,
+        size_t a_elements,
+        const int16_t * b,
+        size_t b_elements,
+        int16_t * c,
+        size_t c_elements);
+
 static enum ggml_status ggml_backend_xdna_graph_compute(
         ggml_backend_t backend,
         struct ggml_cgraph * cgraph) {
-    (void) backend;
-    (void) cgraph;
+    if (backend == nullptr || cgraph == nullptr) {
+        return GGML_STATUS_FAILED;
+    }
 
-    // No GGML operations are supported yet.
-    return GGML_STATUS_FAILED;
+    if (ggml_graph_n_nodes(cgraph) != 1) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: controlled graph path requires exactly one node\n");
+        return GGML_STATUS_FAILED;
+    }
+
+    struct ggml_tensor * node = ggml_graph_node(cgraph, 0);
+
+    if (node == nullptr ||
+        node->op != GGML_OP_MUL_MAT ||
+        node->src[0] == nullptr ||
+        node->src[1] == nullptr) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: controlled graph path requires one MUL_MAT node\n");
+        return GGML_STATUS_FAILED;
+    }
+
+    const struct ggml_tensor * src0 = node->src[0];
+    const struct ggml_tensor * src1 = node->src[1];
+
+    if (src0->type != GGML_TYPE_I16 ||
+        src1->type != GGML_TYPE_I16 ||
+        node->type != GGML_TYPE_F32) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: controlled MUL_MAT requires I16 x I16 -> F32\n");
+        return GGML_STATUS_FAILED;
+    }
+
+    constexpr int64_t size = 256;
+
+    if (src0->ne[0] != size ||
+        src0->ne[1] != size ||
+        src0->ne[2] != 1 ||
+        src0->ne[3] != 1 ||
+        src1->ne[0] != size ||
+        src1->ne[1] != size ||
+        src1->ne[2] != 1 ||
+        src1->ne[3] != 1 ||
+        node->ne[0] != size ||
+        node->ne[1] != size ||
+        node->ne[2] != 1 ||
+        node->ne[3] != 1) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: controlled MUL_MAT requires 256x256 tensors\n");
+        return GGML_STATUS_FAILED;
+    }
+
+    if (!ggml_is_contiguous(src0) ||
+        !ggml_is_contiguous(src1) ||
+        !ggml_is_contiguous(node)) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: controlled MUL_MAT requires contiguous tensors\n");
+        return GGML_STATUS_FAILED;
+    }
+
+    if (src0->data == nullptr ||
+        src1->data == nullptr ||
+        node->data == nullptr) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: controlled MUL_MAT requires host-accessible tensor data\n");
+        return GGML_STATUS_FAILED;
+    }
+
+    std::fprintf(
+        stderr,
+        "ggml_xdna: controlled 256x256 I16 MUL_MAT graph accepted\n");
+
+    auto * ctx =
+        static_cast<ggml_backend_xdna_backend_context *>(backend->context);
+
+    if (ctx == nullptr || !ggml_backend_xdna_load_instructions(ctx)) {
+        return GGML_STATUS_FAILED;
+    }
+
+    constexpr size_t elements = 256 * 256;
+
+    const auto * src0_data =
+        static_cast<const int16_t *>(src0->data);
+    const auto * src1_data =
+        static_cast<const int16_t *>(src1->data);
+
+    auto * dst_data =
+        static_cast<float *>(node->data);
+
+    // The current NPU kernel stores the accumulated result as int16.
+    // Restrict this controlled path to inputs whose worst-case dot product
+    // is guaranteed to fit exactly in int16.
+    int32_t max_abs_src0 = 0;
+    int32_t max_abs_src1 = 0;
+
+    for (size_t i = 0; i < elements; ++i) {
+        const int32_t v0 = static_cast<int32_t>(src0_data[i]);
+        const int32_t v1 = static_cast<int32_t>(src1_data[i]);
+
+        const int32_t a0 = v0 < 0 ? -v0 : v0;
+        const int32_t a1 = v1 < 0 ? -v1 : v1;
+
+        max_abs_src0 = std::max(max_abs_src0, a0);
+        max_abs_src1 = std::max(max_abs_src1, a1);
+    }
+
+    const int64_t worst_case =
+        static_cast<int64_t>(max_abs_src0) *
+        static_cast<int64_t>(max_abs_src1) *
+        size;
+
+    if (worst_case > 32767) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: controlled MUL_MAT input range may overflow i16 output\n");
+        return GGML_STATUS_FAILED;
+    }
+
+    // GGML MUL_MAT semantics:
+    //
+    // dst[m, n] = dot(src0[n, :], src1[m, :])
+    //
+    // The NPU kernel computes C = A * B, therefore:
+    // A = src1
+    // B = transpose(src0)
+    std::vector<int16_t> src0_transposed(elements);
+    std::vector<int16_t> result_i16(elements);
+
+    for (int64_t row = 0; row < size; ++row) {
+        for (int64_t col = 0; col < size; ++col) {
+            src0_transposed[
+                static_cast<size_t>(col) * size + row] =
+                src0_data[
+                    static_cast<size_t>(row) * size + col];
+        }
+    }
+
+    if (!ggml_backend_xdna_run_i16_matmul(
+            backend,
+            ctx->instructions.data(),
+            static_cast<uint32_t>(ctx->instructions.size()),
+            src1_data,
+            elements,
+            src0_transposed.data(),
+            elements,
+            result_i16.data(),
+            elements)) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: controlled MUL_MAT execution failed\n");
+        return GGML_STATUS_FAILED;
+    }
+
+    for (size_t i = 0; i < elements; ++i) {
+        dst_data[i] = static_cast<float>(result_i16[i]);
+    }
+
+    std::fprintf(
+        stderr,
+        "ggml_xdna: controlled 256x256 I16 MUL_MAT executed on XDNA\n");
+
+    return GGML_STATUS_SUCCESS;
 }
 
 static bool ggml_backend_xdna_run_i16_matmul(
