@@ -3,7 +3,10 @@
 #include "ggml-backend-impl.h"
 
 #include <xrt/xrt_device.h>
+#include <xrt/xrt_hw_context.h>
+#include <xrt/xrt_kernel.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdio>
 #include <exception>
@@ -14,6 +17,17 @@ struct ggml_backend_xdna_context {
     std::unique_ptr<xrt::device> xrt_device;
     std::string description = "AMD XDNA NPU (XRT device 0)";
     std::string device_id;
+};
+
+struct ggml_backend_xdna_backend_context {
+    ggml_backend_xdna_context * device_context = nullptr;
+
+    std::string xclbin_path;
+    std::string kernel_name = "MLIR_AIE";
+
+    std::unique_ptr<xrt::xclbin> xclbin;
+    std::unique_ptr<xrt::hw_context> hw_context;
+    std::unique_ptr<xrt::kernel> kernel;
 };
 
 static ggml_backend_xdna_context ggml_backend_xdna_create_context() {
@@ -120,6 +134,78 @@ static void ggml_backend_xdna_device_get_props(
     props->caps         = {};
 }
 
+static bool ggml_backend_xdna_init_kernel(
+        ggml_backend_xdna_backend_context * ctx,
+        const char * params) {
+    if (params == nullptr || params[0] == '\0') {
+        // Kernel initialization is optional for now. This preserves the
+        // registration/backend-instance milestones when no XCLBIN is supplied.
+        return true;
+    }
+
+    ctx->xclbin_path = params;
+
+    try {
+        ctx->xclbin =
+            std::make_unique<xrt::xclbin>(ctx->xclbin_path);
+
+        auto xkernels = ctx->xclbin->get_kernels();
+
+        auto it = std::find_if(
+            xkernels.begin(),
+            xkernels.end(),
+            [&](xrt::xclbin::kernel k) {
+                return k.get_name().rfind(ctx->kernel_name, 0) == 0;
+            });
+
+        if (it == xkernels.end()) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: kernel '%s' not found in XCLBIN: %s\n",
+                ctx->kernel_name.c_str(),
+                ctx->xclbin_path.c_str());
+            return false;
+        }
+
+        const std::string resolved_kernel_name = it->get_name();
+
+        ctx->device_context->xrt_device->register_xclbin(
+            *ctx->xclbin);
+
+        ctx->hw_context =
+            std::make_unique<xrt::hw_context>(
+                *ctx->device_context->xrt_device,
+                ctx->xclbin->get_uuid());
+
+        ctx->kernel =
+            std::make_unique<xrt::kernel>(
+                *ctx->hw_context,
+                resolved_kernel_name);
+
+        ctx->kernel_name = resolved_kernel_name;
+
+        std::fprintf(
+            stderr,
+            "ggml_xdna: XRT kernel ready: %s\n",
+            ctx->kernel_name.c_str());
+
+        return true;
+    } catch (const std::exception & e) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: failed to initialize XCLBIN '%s': %s\n",
+            ctx->xclbin_path.c_str(),
+            e.what());
+        return false;
+    } catch (...) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: failed to initialize XCLBIN '%s': unknown error\n",
+            ctx->xclbin_path.c_str());
+        return false;
+    }
+}
+
 // backend interface
 
 static const char * ggml_backend_xdna_get_name(ggml_backend_t backend) {
@@ -128,8 +214,12 @@ static const char * ggml_backend_xdna_get_name(ggml_backend_t backend) {
 }
 
 static void ggml_backend_xdna_free(ggml_backend_t backend) {
-    // The XRT device belongs to the static device context and must not be
-    // destroyed when an individual backend instance is released.
+    auto * ctx =
+        static_cast<ggml_backend_xdna_backend_context *>(backend->context);
+
+    // kernel, hw_context and xclbin belong to the backend instance.
+    // The physical xrt::device remains owned by the static device context.
+    delete ctx;
     delete backend;
 }
 
@@ -176,12 +266,20 @@ static ggml_guid_t ggml_backend_xdna_guid(void) {
 static ggml_backend_t ggml_backend_xdna_device_init(
         ggml_backend_dev_t dev,
         const char * params) {
-    (void) params;
-
-    ggml_backend_xdna_context * ctx =
+    ggml_backend_xdna_context * device_ctx =
         ggml_backend_xdna_get_context(dev);
 
-    if (ctx == nullptr || ctx->xrt_device == nullptr) {
+    if (device_ctx == nullptr || device_ctx->xrt_device == nullptr) {
+        return nullptr;
+    }
+
+    auto * backend_ctx =
+        new ggml_backend_xdna_backend_context;
+
+    backend_ctx->device_context = device_ctx;
+
+    if (!ggml_backend_xdna_init_kernel(backend_ctx, params)) {
+        delete backend_ctx;
         return nullptr;
     }
 
@@ -189,7 +287,7 @@ static ggml_backend_t ggml_backend_xdna_device_init(
         /* .guid    = */ ggml_backend_xdna_guid(),
         /* .iface   = */ ggml_backend_xdna_i,
         /* .device  = */ dev,
-        /* .context = */ ctx,
+        /* .context = */ backend_ctx,
     };
 }
 
