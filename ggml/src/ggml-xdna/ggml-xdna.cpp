@@ -120,15 +120,77 @@ static void ggml_backend_xdna_device_get_props(
     props->caps         = {};
 }
 
+// backend interface
+
+static const char * ggml_backend_xdna_get_name(ggml_backend_t backend) {
+    (void) backend;
+    return GGML_XDNA_NAME;
+}
+
+static void ggml_backend_xdna_free(ggml_backend_t backend) {
+    // The XRT device belongs to the static device context and must not be
+    // destroyed when an individual backend instance is released.
+    delete backend;
+}
+
+static enum ggml_status ggml_backend_xdna_graph_compute(
+        ggml_backend_t backend,
+        struct ggml_cgraph * cgraph) {
+    (void) backend;
+    (void) cgraph;
+
+    // No GGML operations are supported yet.
+    return GGML_STATUS_FAILED;
+}
+
+static struct ggml_backend_i ggml_backend_xdna_i = {
+    /* .get_name                = */ ggml_backend_xdna_get_name,
+    /* .free                    = */ ggml_backend_xdna_free,
+    /* .set_tensor_async        = */ nullptr,
+    /* .get_tensor_async        = */ nullptr,
+    /* .set_tensor_2d_async     = */ nullptr,
+    /* .get_tensor_2d_async     = */ nullptr,
+    /* .cpy_tensor_async        = */ nullptr,
+    /* .synchronize             = */ nullptr,
+    /* .graph_plan_create       = */ nullptr,
+    /* .graph_plan_free         = */ nullptr,
+    /* .graph_plan_update       = */ nullptr,
+    /* .graph_plan_compute      = */ nullptr,
+    /* .graph_compute           = */ ggml_backend_xdna_graph_compute,
+    /* .event_record            = */ nullptr,
+    /* .event_wait              = */ nullptr,
+    /* .graph_optimize          = */ nullptr,
+};
+
+static ggml_guid_t ggml_backend_xdna_guid(void) {
+    static ggml_guid guid = {
+        0x58, 0x44, 0x4e, 0x41,
+        0x2d, 0x47, 0x47, 0x4d,
+        0x4c, 0x2d, 0x58, 0x52,
+        0x54, 0x2d, 0x30, 0x31
+    };
+
+    return &guid;
+}
+
 static ggml_backend_t ggml_backend_xdna_device_init(
         ggml_backend_dev_t dev,
         const char * params) {
-    (void) dev;
     (void) params;
 
-    // XRT device detection only. A real GGML backend object is introduced
-    // in a later milestone.
-    return nullptr;
+    ggml_backend_xdna_context * ctx =
+        ggml_backend_xdna_get_context(dev);
+
+    if (ctx == nullptr || ctx->xrt_device == nullptr) {
+        return nullptr;
+    }
+
+    return new ggml_backend {
+        /* .guid    = */ ggml_backend_xdna_guid(),
+        /* .iface   = */ ggml_backend_xdna_i,
+        /* .device  = */ dev,
+        /* .context = */ ctx,
+    };
 }
 
 static ggml_backend_buffer_type_t ggml_backend_xdna_device_get_buffer_type(ggml_backend_dev_t dev) {
