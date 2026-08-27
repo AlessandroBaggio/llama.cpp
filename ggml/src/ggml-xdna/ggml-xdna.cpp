@@ -679,11 +679,43 @@ static bool ggml_backend_xdna_device_supports_op(
         ggml_backend_dev_t dev,
         const struct ggml_tensor * op) {
     (void) dev;
-    (void) op;
 
-    // Keep scheduler offload disabled until XDNA supports
-    // general GGML operation semantics.
-    return false;
+    if (op == nullptr ||
+        op->op != GGML_OP_MUL_MAT ||
+        op->src[0] == nullptr ||
+        op->src[1] == nullptr) {
+        return false;
+    }
+
+    const struct ggml_tensor * src0 = op->src[0];
+    const struct ggml_tensor * src1 = op->src[1];
+
+    if (src0->type != GGML_TYPE_I16 ||
+        src1->type != GGML_TYPE_I16 ||
+        op->type != GGML_TYPE_F32) {
+        return false;
+    }
+
+    constexpr int64_t size = 256;
+
+    if (src0->ne[0] != size ||
+        src0->ne[1] != size ||
+        src0->ne[2] != 1 ||
+        src0->ne[3] != 1 ||
+        src1->ne[0] != size ||
+        src1->ne[1] != size ||
+        src1->ne[2] != 1 ||
+        src1->ne[3] != 1 ||
+        op->ne[0] != size ||
+        op->ne[1] != size ||
+        op->ne[2] != 1 ||
+        op->ne[3] != 1) {
+        return false;
+    }
+
+    return ggml_is_contiguous(src0) &&
+           ggml_is_contiguous(src1) &&
+           ggml_is_contiguous(op);
 }
 
 static bool ggml_backend_xdna_device_supports_buft(
