@@ -221,6 +221,7 @@ option(GGML_HIP_EXPORT_METRICS              "ggml: enable kernel perf metrics ou
 option(GGML_MUSA_GRAPHS                     "ggml: use MUSA graph, experimental, unstable"    OFF)
 option(GGML_MUSA_MUDNN_COPY                 "ggml: enable muDNN for accelerated copy"         OFF)
 option(GGML_VULKAN                          "ggml: use Vulkan"                                OFF)
+option(GGML_XDNA                            "ggml: use AMD XDNA NPU backend"                  OFF)
 option(GGML_VULKAN_CHECK_RESULTS            "ggml: run Vulkan op checks"                      OFF)
 option(GGML_VULKAN_DEBUG                    "ggml: enable Vulkan debug output"                OFF)
 option(GGML_VULKAN_MEMORY_DEBUG             "ggml: enable Vulkan memory debug output"         OFF)
@@ -336,6 +337,7 @@ set(GGML_PUBLIC_HEADERS
     include/ggml-virtgpu.h
     include/ggml-sycl.h
     include/ggml-vulkan.h
+    include/ggml-xdna.h
     include/ggml-webgpu.h
     include/ggml-zendnn.h
     include/ggml-openvino.h

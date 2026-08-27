@@ -46,6 +46,10 @@
 #include "ggml-vulkan.h"
 #endif
 
+#ifdef GGML_USE_XDNA
+#include "ggml-xdna.h"
+#endif
+
 #ifdef GGML_USE_WEBGPU
 #include "ggml-webgpu.h"
 #endif
@@ -132,6 +136,13 @@ struct ggml_backend_registry {
         register_backend(ggml_backend_vk_reg());
     } else {
         GGML_LOG_DEBUG("Vulkan backend disabled by GGML_DISABLE_VULKAN environment variable\n");
+    }
+#endif
+#ifdef GGML_USE_XDNA
+    if (getenv("GGML_DISABLE_XDNA") == nullptr) {
+        register_backend(ggml_backend_xdna_reg());
+    } else {
+        GGML_LOG_DEBUG("XDNA backend disabled by GGML_DISABLE_XDNA environment variable\n");
     }
 #endif
 #ifdef GGML_USE_WEBGPU
