@@ -319,7 +319,7 @@ static void ggml_backend_xdna_free(ggml_backend_t backend) {
     delete backend;
 }
 
-static bool ggml_backend_xdna_run_i16_matmul(
+static bool ggml_backend_xdna_run_i16_f32_matmul(
         ggml_backend_t backend,
         const uint32_t * instructions,
         uint32_t instruction_count,
@@ -327,7 +327,7 @@ static bool ggml_backend_xdna_run_i16_matmul(
         size_t a_elements,
         const int16_t * b,
         size_t b_elements,
-        int16_t * c,
+        float * c,
         size_t c_elements);
 
 static enum ggml_status ggml_backend_xdna_graph_compute(
@@ -427,34 +427,6 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
     auto * dst_data =
         static_cast<float *>(node->data);
 
-    // The current NPU kernel stores the accumulated result as int16.
-    // Restrict this controlled path to inputs whose worst-case dot product
-    // is guaranteed to fit exactly in int16.
-    int32_t max_abs_src0 = 0;
-    int32_t max_abs_src1 = 0;
-
-    for (size_t i = 0; i < elements; ++i) {
-        const int32_t v0 = static_cast<int32_t>(src0_data[i]);
-        const int32_t v1 = static_cast<int32_t>(src1_data[i]);
-
-        const int32_t a0 = v0 < 0 ? -v0 : v0;
-        const int32_t a1 = v1 < 0 ? -v1 : v1;
-
-        max_abs_src0 = std::max(max_abs_src0, a0);
-        max_abs_src1 = std::max(max_abs_src1, a1);
-    }
-
-    const int64_t worst_case =
-        static_cast<int64_t>(max_abs_src0) *
-        static_cast<int64_t>(max_abs_src1) *
-        size;
-
-    if (worst_case > 32767) {
-        std::fprintf(
-            stderr,
-            "ggml_xdna: controlled MUL_MAT input range may overflow i16 output\n");
-        return GGML_STATUS_FAILED;
-    }
 
     // GGML MUL_MAT semantics:
     //
@@ -464,7 +436,7 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
     // A = src1
     // B = transpose(src0)
     std::vector<int16_t> src0_transposed(elements);
-    std::vector<int16_t> result_i16(elements);
+
 
     for (int64_t row = 0; row < size; ++row) {
         for (int64_t col = 0; col < size; ++col) {
@@ -475,7 +447,7 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
         }
     }
 
-    if (!ggml_backend_xdna_run_i16_matmul(
+    if (!ggml_backend_xdna_run_i16_f32_matmul(
             backend,
             ctx->instructions.data(),
             static_cast<uint32_t>(ctx->instructions.size()),
@@ -483,7 +455,7 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
             elements,
             src0_transposed.data(),
             elements,
-            result_i16.data(),
+            dst_data,
             elements)) {
         std::fprintf(
             stderr,
@@ -491,9 +463,6 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
         return GGML_STATUS_FAILED;
     }
 
-    for (size_t i = 0; i < elements; ++i) {
-        dst_data[i] = static_cast<float>(result_i16[i]);
-    }
 
     std::fprintf(
         stderr,
@@ -502,7 +471,7 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
     return GGML_STATUS_SUCCESS;
 }
 
-static bool ggml_backend_xdna_run_i16_matmul(
+static bool ggml_backend_xdna_run_i16_f32_matmul(
         ggml_backend_t backend,
         const uint32_t * instructions,
         uint32_t instruction_count,
@@ -510,7 +479,7 @@ static bool ggml_backend_xdna_run_i16_matmul(
         size_t a_elements,
         const int16_t * b,
         size_t b_elements,
-        int16_t * c,
+        float * c,
         size_t c_elements) {
     if (backend == nullptr ||
         instructions == nullptr ||
@@ -521,7 +490,7 @@ static bool ggml_backend_xdna_run_i16_matmul(
         b_elements == 0 ||
         c == nullptr ||
         c_elements == 0) {
-        std::fprintf(stderr, "ggml_xdna: invalid i16 matmul arguments\n");
+        std::fprintf(stderr, "ggml_xdna: invalid i16-f32 matmul arguments\n");
         return false;
     }
 
@@ -534,7 +503,7 @@ static bool ggml_backend_xdna_run_i16_matmul(
         ctx->kernel == nullptr) {
         std::fprintf(
             stderr,
-            "ggml_xdna: i16 matmul requires an initialized XRT kernel\n");
+            "ggml_xdna: i16-f32 matmul requires an initialized XRT kernel\n");
         return false;
     }
 
@@ -565,7 +534,7 @@ static bool ggml_backend_xdna_run_i16_matmul(
 
         xrt::bo bo_c(
             device,
-            c_elements * sizeof(int16_t),
+            c_elements * sizeof(float),
             XRT_BO_FLAGS_HOST_ONLY,
             kernel.group_id(5));
 
@@ -590,11 +559,11 @@ static bool ggml_backend_xdna_run_i16_matmul(
             b_elements * sizeof(int16_t));
         bo_b.sync(XCL_BO_SYNC_BO_TO_DEVICE);
 
-        int16_t * buf_c = bo_c.map<int16_t *>();
+        float * buf_c = bo_c.map<float *>();
         std::memset(
             buf_c,
             0,
-            c_elements * sizeof(int16_t));
+            c_elements * sizeof(float));
         bo_c.sync(XCL_BO_SYNC_BO_TO_DEVICE);
 
         constexpr unsigned int opcode = 3;
@@ -614,19 +583,19 @@ static bool ggml_backend_xdna_run_i16_matmul(
         std::memcpy(
             c,
             buf_c,
-            c_elements * sizeof(int16_t));
+            c_elements * sizeof(float));
 
         return true;
     } catch (const std::exception & e) {
         std::fprintf(
             stderr,
-            "ggml_xdna: i16 matmul execution failed: %s\n",
+            "ggml_xdna: i16-f32 matmul execution failed: %s\n",
             e.what());
         return false;
     } catch (...) {
         std::fprintf(
             stderr,
-            "ggml_xdna: i16 matmul execution failed: unknown error\n");
+            "ggml_xdna: i16-f32 matmul execution failed: unknown error\n");
         return false;
     }
 }
@@ -778,8 +747,8 @@ static void * ggml_backend_xdna_reg_get_proc_address(
     (void) reg;
 
     if (name != nullptr &&
-        std::strcmp(name, "ggml_backend_xdna_run_i16_matmul") == 0) {
-        return (void *) ggml_backend_xdna_run_i16_matmul;
+        std::strcmp(name, "ggml_backend_xdna_run_i16_f32_matmul") == 0) {
+        return (void *) ggml_backend_xdna_run_i16_f32_matmul;
     }
 
     return nullptr;
