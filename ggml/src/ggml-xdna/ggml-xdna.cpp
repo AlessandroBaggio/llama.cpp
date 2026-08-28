@@ -1,6 +1,7 @@
 #include "ggml-xdna.h"
 
 #include "ggml-backend-impl.h"
+#include "ggml-quants.h"
 
 #include <xrt/xrt_bo.h>
 #include <xrt/xrt_device.h>
@@ -330,6 +331,16 @@ static bool ggml_backend_xdna_run_i16_f32_matmul(
         float * c,
         size_t c_elements);
 
+static bool ggml_backend_xdna_run_q4k_q8k_k2560(
+        ggml_backend_t backend,
+        const uint32_t * instructions,
+        uint32_t instruction_count,
+        const void * q4_row,
+        size_t q4_row_bytes,
+        const float * activations,
+        size_t activation_elements,
+        float * result);
+
 static enum ggml_status ggml_backend_xdna_graph_compute(
         ggml_backend_t backend,
         struct ggml_cgraph * cgraph) {
@@ -600,6 +611,222 @@ static bool ggml_backend_xdna_run_i16_f32_matmul(
     }
 }
 
+static bool ggml_backend_xdna_run_q4k_q8k_k2560(
+        ggml_backend_t backend,
+        const uint32_t * instructions,
+        uint32_t instruction_count,
+        const void * q4_row,
+        size_t q4_row_bytes,
+        const float * activations,
+        size_t activation_elements,
+        float * result) {
+    constexpr int64_t elements = 2560;
+    constexpr size_t block_count = 10;
+    constexpr size_t q4_transport_block_bytes = 152;
+
+    static_assert(QK_K == 256, "unexpected QK_K");
+    static_assert(sizeof(block_q4_K) == 144, "unexpected Q4_K block size");
+    static_assert(sizeof(block_q8_K) == 292, "unexpected Q8_K block size");
+
+    constexpr size_t q4_native_row_bytes =
+        block_count * sizeof(block_q4_K);
+
+    constexpr size_t q4_transport_row_bytes =
+        block_count * q4_transport_block_bytes;
+
+    constexpr size_t q8_row_bytes =
+        block_count * sizeof(block_q8_K);
+
+    if (backend == nullptr ||
+        instructions == nullptr ||
+        instruction_count == 0 ||
+        q4_row == nullptr ||
+        activations == nullptr ||
+        result == nullptr ||
+        q4_row_bytes != q4_native_row_bytes ||
+        activation_elements != static_cast<size_t>(elements)) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: invalid Q4_K x Q8_K K=2560 arguments\n");
+        return false;
+    }
+
+    auto * ctx =
+        static_cast<ggml_backend_xdna_backend_context *>(
+            backend->context);
+
+    if (ctx == nullptr ||
+        ctx->device_context == nullptr ||
+        ctx->device_context->xrt_device == nullptr ||
+        ctx->kernel == nullptr) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: Q4_K x Q8_K K=2560 requires an initialized XRT kernel\n");
+        return false;
+    }
+
+    const auto * q4_native =
+        static_cast<const uint8_t *>(q4_row);
+
+    std::vector<uint8_t> q4_transport(
+        q4_transport_row_bytes);
+
+    for (size_t block = 0; block < block_count; ++block) {
+        block_q4_K native_block;
+
+        std::memcpy(
+            &native_block,
+            q4_native + block * sizeof(block_q4_K),
+            sizeof(native_block));
+
+        uint8_t * dst =
+            q4_transport.data() +
+            block * q4_transport_block_bytes;
+
+        std::memcpy(
+            dst,
+            &native_block,
+            sizeof(native_block));
+
+        const float d =
+            ggml_fp16_to_fp32(native_block.d);
+
+        const float dmin =
+            ggml_fp16_to_fp32(native_block.dmin);
+
+        std::memcpy(
+            dst + sizeof(block_q4_K),
+            &d,
+            sizeof(d));
+
+        std::memcpy(
+            dst + sizeof(block_q4_K) + sizeof(d),
+            &dmin,
+            sizeof(dmin));
+    }
+
+    std::vector<block_q8_K> q8_blocks(block_count);
+
+    // quantize_row_q8_K_ref leaves bsums untouched for an
+    // all-zero block, so initialize the complete native row.
+    std::memset(
+        q8_blocks.data(),
+        0,
+        q8_row_bytes);
+
+    quantize_row_q8_K_ref(
+        activations,
+        q8_blocks.data(),
+        elements);
+
+    try {
+        xrt::device & device =
+            *ctx->device_context->xrt_device;
+
+        xrt::kernel & kernel =
+            *ctx->kernel;
+
+        xrt::bo bo_instr(
+            device,
+            static_cast<size_t>(instruction_count) *
+                sizeof(uint32_t),
+            XCL_BO_FLAGS_CACHEABLE,
+            kernel.group_id(1));
+
+        xrt::bo bo_q4(
+            device,
+            q4_transport_row_bytes,
+            XRT_BO_FLAGS_HOST_ONLY,
+            kernel.group_id(3));
+
+        xrt::bo bo_q8(
+            device,
+            q8_row_bytes,
+            XRT_BO_FLAGS_HOST_ONLY,
+            kernel.group_id(4));
+
+        xrt::bo bo_out(
+            device,
+            sizeof(float),
+            XRT_BO_FLAGS_HOST_ONLY,
+            kernel.group_id(5));
+
+        void * buf_instr =
+            bo_instr.map<void *>();
+
+        std::memcpy(
+            buf_instr,
+            instructions,
+            static_cast<size_t>(instruction_count) *
+                sizeof(uint32_t));
+
+        bo_instr.sync(
+            XCL_BO_SYNC_BO_TO_DEVICE);
+
+        void * buf_q4 =
+            bo_q4.map<void *>();
+
+        std::memcpy(
+            buf_q4,
+            q4_transport.data(),
+            q4_transport_row_bytes);
+
+        bo_q4.sync(
+            XCL_BO_SYNC_BO_TO_DEVICE);
+
+        void * buf_q8 =
+            bo_q8.map<void *>();
+
+        std::memcpy(
+            buf_q8,
+            q8_blocks.data(),
+            q8_row_bytes);
+
+        bo_q8.sync(
+            XCL_BO_SYNC_BO_TO_DEVICE);
+
+        float * buf_out =
+            bo_out.map<float *>();
+
+        *buf_out = 0.0f;
+
+        bo_out.sync(
+            XCL_BO_SYNC_BO_TO_DEVICE);
+
+        constexpr unsigned int opcode = 3;
+
+        auto run = kernel(
+            opcode,
+            bo_instr,
+            instruction_count,
+            bo_q4,
+            bo_q8,
+            bo_out);
+
+        run.wait();
+
+        bo_out.sync(
+            XCL_BO_SYNC_BO_FROM_DEVICE);
+
+        *result = *buf_out;
+
+        return true;
+    }
+    catch (const std::exception & e) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: Q4_K x Q8_K K=2560 execution failed: %s\n",
+            e.what());
+        return false;
+    }
+    catch (...) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: Q4_K x Q8_K K=2560 execution failed: unknown error\n");
+        return false;
+    }
+}
+
 static struct ggml_backend_i ggml_backend_xdna_i = {
     /* .get_name                = */ ggml_backend_xdna_get_name,
     /* .free                    = */ ggml_backend_xdna_free,
@@ -781,6 +1008,11 @@ static void * ggml_backend_xdna_reg_get_proc_address(
     if (name != nullptr &&
         std::strcmp(name, "ggml_backend_xdna_run_i16_f32_matmul") == 0) {
         return (void *) ggml_backend_xdna_run_i16_f32_matmul;
+    }
+
+    if (name != nullptr &&
+        std::strcmp(name, "ggml_backend_xdna_run_q4k_q8k_k2560") == 0) {
+        return (void *) ggml_backend_xdna_run_q4k_q8k_k2560;
     }
 
     return nullptr;
