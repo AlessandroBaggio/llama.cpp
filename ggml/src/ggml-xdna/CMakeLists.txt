@@ -1,5 +1,8 @@
 ggml_add_backend_library(ggml-xdna
     ggml-xdna.cpp
+    ggml-xdna-sha256.c
+    ggml-xdna-sha256.h
+    ggml-xdna-rotate-bits.h
     ../../include/ggml-xdna.h
 )
 

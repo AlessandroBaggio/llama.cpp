@@ -2,6 +2,7 @@
 
 #include "ggml-backend-impl.h"
 #include "ggml-quants.h"
+#include "ggml-xdna-sha256.h"
 
 #include <xrt/xrt_bo.h>
 #include <xrt/xrt_device.h>
@@ -408,6 +409,301 @@ static bool ggml_backend_xdna_load_instructions(
         ctx->instructions.clear();
         return false;
     }
+}
+
+static const unsigned char *
+ggml_backend_xdna_kernel_profile_instruction_sha256(
+        ggml_backend_xdna_kernel_profile profile) {
+    static constexpr unsigned char i16_256_sha256[
+        GGML_XDNA_SHA256_DIGEST_SIZE] = {
+        0xac, 0xa7, 0xc1, 0xab, 0x8a, 0xe9, 0x0f, 0x83,
+        0xc8, 0x24, 0xeb, 0xb5, 0x6e, 0x0e, 0x8d, 0x55,
+        0x9b, 0x1b, 0x2f, 0x21, 0x7e, 0xd6, 0x6e, 0x08,
+        0x51, 0xdf, 0x37, 0xd3, 0x15, 0xce, 0x1d, 0x14,
+    };
+
+    static constexpr unsigned char q4k_q8k_k2560_sha256[
+        GGML_XDNA_SHA256_DIGEST_SIZE] = {
+        0xc1, 0xc8, 0x45, 0xd8, 0x3f, 0xcd, 0x97, 0xa1,
+        0xaf, 0xff, 0x80, 0xab, 0x15, 0x0f, 0xc4, 0xe9,
+        0x10, 0x89, 0x30, 0x6a, 0x9e, 0xfa, 0xe1, 0x67,
+        0x82, 0xb5, 0xea, 0xdc, 0x38, 0x7c, 0x29, 0x14,
+    };
+
+    switch (profile) {
+        case ggml_backend_xdna_kernel_profile::none:
+            return nullptr;
+
+        case ggml_backend_xdna_kernel_profile::i16_256:
+            return i16_256_sha256;
+
+        case ggml_backend_xdna_kernel_profile::q4k_q8k_k2560:
+            return q4k_q8k_k2560_sha256;
+    }
+
+    return nullptr;
+}
+
+static void ggml_backend_xdna_format_sha256(
+        const unsigned char digest[
+            GGML_XDNA_SHA256_DIGEST_SIZE],
+        char output[
+            GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1]) {
+    static constexpr char hex[] =
+        "0123456789abcdef";
+
+    for (size_t i = 0;
+         i < GGML_XDNA_SHA256_DIGEST_SIZE;
+         ++i) {
+        output[2 * i] =
+            hex[(digest[i] >> 4) & 0x0f];
+
+        output[2 * i + 1] =
+            hex[digest[i] & 0x0f];
+    }
+
+    output[
+        GGML_XDNA_SHA256_DIGEST_SIZE * 2] = '\0';
+}
+
+static bool ggml_backend_xdna_hash_file_sha256(
+        const std::string & path,
+        unsigned char digest[
+            GGML_XDNA_SHA256_DIGEST_SIZE]) {
+    try {
+        std::ifstream file(
+            path,
+            std::ios::binary);
+
+        if (!file) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: failed to open file for SHA256: %s\n",
+                path.c_str());
+
+            return false;
+        }
+
+        ggml_xdna_sha256_t hash;
+        ggml_xdna_sha256_init(&hash);
+
+        char buffer[64 * 1024];
+
+        while (file) {
+            file.read(
+                buffer,
+                sizeof(buffer));
+
+            const std::streamsize count =
+                file.gcount();
+
+            if (count > 0) {
+                ggml_xdna_sha256_update(
+                    &hash,
+                    reinterpret_cast<
+                        const unsigned char *>(buffer),
+                    static_cast<size_t>(count));
+            }
+        }
+
+        if (file.bad()) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: failed while hashing file: %s\n",
+                path.c_str());
+
+            return false;
+        }
+
+        ggml_xdna_sha256_final(
+            &hash,
+            digest);
+
+        return true;
+    } catch (const std::exception & e) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: failed to hash file '%s': %s\n",
+            path.c_str(),
+            e.what());
+
+        return false;
+    } catch (...) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: failed to hash file '%s': "
+            "unknown error\n",
+            path.c_str());
+
+        return false;
+    }
+}
+
+static bool
+ggml_backend_xdna_kernel_profile_xclbin_sha256_matches(
+        ggml_backend_xdna_kernel_profile profile,
+        const unsigned char digest[
+            GGML_XDNA_SHA256_DIGEST_SIZE]) {
+    static constexpr unsigned char
+        i16_256_sha256[
+            GGML_XDNA_SHA256_DIGEST_SIZE] = {
+        0xd4, 0x24, 0x66, 0xe1, 0x54, 0xed, 0xe8, 0xc2,
+        0x02, 0x05, 0x67, 0x8d, 0x9f, 0x29, 0x2a, 0xfc,
+        0x8a, 0x05, 0xf2, 0x24, 0x09, 0xd5, 0x8d, 0x29,
+        0x89, 0x5a, 0x9f, 0xe0, 0x64, 0x9e, 0x79, 0x33,
+    };
+
+    static constexpr unsigned char
+        q4k_q8k_k2560_sha256[
+            GGML_XDNA_SHA256_DIGEST_SIZE] = {
+        0x3c, 0xbb, 0xa5, 0x0c, 0xb8, 0xa7, 0x1c, 0xc3,
+        0x8b, 0xf2, 0x7f, 0x81, 0xa4, 0x6c, 0x03, 0x48,
+        0x80, 0xed, 0xd9, 0x46, 0x45, 0x51, 0x7a, 0xc3,
+        0xd2, 0x9f, 0x8d, 0xd6, 0x04, 0x47, 0xa6, 0x0a,
+    };
+
+    switch (profile) {
+        case ggml_backend_xdna_kernel_profile::none:
+            return false;
+
+        case ggml_backend_xdna_kernel_profile::i16_256:
+            return std::memcmp(
+                digest,
+                i16_256_sha256,
+                GGML_XDNA_SHA256_DIGEST_SIZE) == 0;
+
+        case ggml_backend_xdna_kernel_profile::q4k_q8k_k2560:
+            return std::memcmp(
+                digest,
+                q4k_q8k_k2560_sha256,
+                GGML_XDNA_SHA256_DIGEST_SIZE) == 0;
+    }
+
+    return false;
+}
+
+static bool ggml_backend_xdna_validate_kernel_profile(
+        ggml_backend_xdna_backend_context * ctx) {
+    if (ctx == nullptr) {
+        return false;
+    }
+
+    if (ctx->kernel_profile ==
+        ggml_backend_xdna_kernel_profile::none) {
+        return true;
+    }
+
+    const unsigned char * expected_instructions =
+        ggml_backend_xdna_kernel_profile_instruction_sha256(
+            ctx->kernel_profile);
+
+    if (expected_instructions == nullptr) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: no instruction fingerprint "
+            "registered for profile '%s'\n",
+            ggml_backend_xdna_kernel_profile_name(
+                ctx->kernel_profile));
+
+        return false;
+    }
+
+    if (!ggml_backend_xdna_load_instructions(ctx)) {
+        return false;
+    }
+
+    unsigned char actual_instructions[
+        GGML_XDNA_SHA256_DIGEST_SIZE];
+
+    ggml_xdna_sha256_hash(
+        actual_instructions,
+        reinterpret_cast<const unsigned char *>(
+            ctx->instructions.data()),
+        ctx->instructions.size() *
+            sizeof(uint32_t));
+
+    if (std::memcmp(
+            actual_instructions,
+            expected_instructions,
+            GGML_XDNA_SHA256_DIGEST_SIZE) != 0) {
+        char actual_hex[
+            GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
+
+        char expected_hex[
+            GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
+
+        ggml_backend_xdna_format_sha256(
+            actual_instructions,
+            actual_hex);
+
+        ggml_backend_xdna_format_sha256(
+            expected_instructions,
+            expected_hex);
+
+        std::fprintf(
+            stderr,
+            "ggml_xdna: instruction fingerprint mismatch "
+            "for profile '%s'\n"
+            "ggml_xdna: expected SHA256: %s\n"
+            "ggml_xdna: actual   SHA256: %s\n"
+            "ggml_xdna: instruction file: %s\n",
+            ggml_backend_xdna_kernel_profile_name(
+                ctx->kernel_profile),
+            expected_hex,
+            actual_hex,
+            ctx->instructions_path.c_str());
+
+        return false;
+    }
+
+    std::fprintf(
+        stderr,
+        "ggml_xdna: instruction fingerprint "
+        "validated for profile '%s'\n",
+        ggml_backend_xdna_kernel_profile_name(
+            ctx->kernel_profile));
+
+    unsigned char actual_xclbin[
+        GGML_XDNA_SHA256_DIGEST_SIZE];
+
+    if (!ggml_backend_xdna_hash_file_sha256(
+            ctx->xclbin_path,
+            actual_xclbin)) {
+        return false;
+    }
+
+    if (!ggml_backend_xdna_kernel_profile_xclbin_sha256_matches(
+            ctx->kernel_profile,
+            actual_xclbin)) {
+        char actual_hex[
+            GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
+
+        ggml_backend_xdna_format_sha256(
+            actual_xclbin,
+            actual_hex);
+
+        std::fprintf(
+            stderr,
+            "ggml_xdna: XCLBIN fingerprint mismatch "
+            "for profile '%s'\n"
+            "ggml_xdna: actual SHA256: %s\n"
+            "ggml_xdna: XCLBIN file: %s\n",
+            ggml_backend_xdna_kernel_profile_name(
+                ctx->kernel_profile),
+            actual_hex,
+            ctx->xclbin_path.c_str());
+
+        return false;
+    }
+
+    std::fprintf(
+        stderr,
+        "ggml_xdna: XCLBIN fingerprint "
+        "validated for profile '%s'\n",
+        ggml_backend_xdna_kernel_profile_name(
+            ctx->kernel_profile));
+
+    return true;
 }
 
 // backend interface
@@ -1155,6 +1451,18 @@ static ggml_backend_t ggml_backend_xdna_device_init(
 
     backend_ctx->device_context = device_ctx;
     backend_ctx->kernel_profile = requested_profile;
+
+    if (requested_profile !=
+        ggml_backend_xdna_kernel_profile::none) {
+        backend_ctx->xclbin_path =
+            xclbin_path;
+
+        if (!ggml_backend_xdna_validate_kernel_profile(
+                backend_ctx)) {
+            delete backend_ctx;
+            return nullptr;
+        }
+    }
 
     const char * kernel_params =
         xclbin_path.empty()
