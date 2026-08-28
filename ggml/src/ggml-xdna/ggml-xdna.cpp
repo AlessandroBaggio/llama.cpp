@@ -20,14 +20,46 @@
 #include <string>
 #include <vector>
 
+enum class ggml_backend_xdna_kernel_profile {
+    none,
+    i16_256,
+    q4k_q8k_k2560,
+};
+
+static const char * ggml_backend_xdna_kernel_profile_name(
+        ggml_backend_xdna_kernel_profile profile) {
+    switch (profile) {
+        case ggml_backend_xdna_kernel_profile::none:
+            return "none";
+        case ggml_backend_xdna_kernel_profile::i16_256:
+            return "i16_256";
+        case ggml_backend_xdna_kernel_profile::q4k_q8k_k2560:
+            return "q4k_q8k_k2560";
+    }
+
+    return "unknown";
+}
+
 struct ggml_backend_xdna_context {
     std::unique_ptr<xrt::device> xrt_device;
     std::string description = "AMD XDNA NPU (XRT device 0)";
     std::string device_id;
+
+    // supports_op() is a device-level callback, therefore every live
+    // backend instance sharing this device must expose the same profile.
+    ggml_backend_xdna_kernel_profile active_profile =
+        ggml_backend_xdna_kernel_profile::none;
+
+    size_t active_backend_count = 0;
 };
 
 struct ggml_backend_xdna_backend_context {
     ggml_backend_xdna_context * device_context = nullptr;
+
+    ggml_backend_xdna_kernel_profile kernel_profile =
+        ggml_backend_xdna_kernel_profile::none;
+
+    bool device_profile_registered = false;
 
     std::string xclbin_path;
     std::string instructions_path;
@@ -142,6 +174,81 @@ static void ggml_backend_xdna_device_get_props(
             ? ctx->device_id.c_str()
             : nullptr;
     props->caps         = {};
+}
+
+static bool ggml_backend_xdna_parse_init_params(
+        const char * params,
+        ggml_backend_xdna_kernel_profile * profile,
+        std::string * xclbin_path) {
+    if (profile == nullptr || xclbin_path == nullptr) {
+        return false;
+    }
+
+    *profile =
+        ggml_backend_xdna_kernel_profile::none;
+
+    xclbin_path->clear();
+
+    if (params == nullptr || params[0] == '\0') {
+        return true;
+    }
+
+    const std::string value(params);
+
+    static constexpr char i16_prefix[] =
+        "profile=i16_256;";
+
+    static constexpr char q4_prefix[] =
+        "profile=q4k_q8k_k2560;";
+
+    if (value.rfind(i16_prefix, 0) == 0) {
+        *profile =
+            ggml_backend_xdna_kernel_profile::i16_256;
+
+        *xclbin_path =
+            value.substr(sizeof(i16_prefix) - 1);
+
+        if (xclbin_path->empty()) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: i16_256 profile requires an XCLBIN path\n");
+            return false;
+        }
+
+        return true;
+    }
+
+    if (value.rfind(q4_prefix, 0) == 0) {
+        *profile =
+            ggml_backend_xdna_kernel_profile::q4k_q8k_k2560;
+
+        *xclbin_path =
+            value.substr(sizeof(q4_prefix) - 1);
+
+        if (xclbin_path->empty()) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: q4k_q8k_k2560 profile requires an XCLBIN path\n");
+            return false;
+        }
+
+        return true;
+    }
+
+    if (value.rfind("profile=", 0) == 0) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: unknown kernel profile in backend params: %s\n",
+            params);
+        return false;
+    }
+
+    // Backward-compatible direct/probe mode.
+    //
+    // A plain path loads the artifact but deliberately carries no
+    // advertised kernel profile.
+    *xclbin_path = value;
+    return true;
 }
 
 static bool ggml_backend_xdna_init_kernel(
@@ -313,6 +420,36 @@ static const char * ggml_backend_xdna_get_name(ggml_backend_t backend) {
 static void ggml_backend_xdna_free(ggml_backend_t backend) {
     auto * ctx =
         static_cast<ggml_backend_xdna_backend_context *>(backend->context);
+
+    if (ctx != nullptr &&
+        ctx->device_context != nullptr &&
+        ctx->device_profile_registered) {
+        auto * device_ctx =
+            ctx->device_context;
+
+        if (device_ctx->active_profile !=
+            ctx->kernel_profile) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: backend/device profile mismatch during free\n");
+        }
+
+        if (device_ctx->active_backend_count == 0) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: active backend count already zero during free\n");
+        }
+        else {
+            --device_ctx->active_backend_count;
+        }
+
+        if (device_ctx->active_backend_count == 0) {
+            device_ctx->active_profile =
+                ggml_backend_xdna_kernel_profile::none;
+        }
+
+        ctx->device_profile_registered = false;
+    }
 
     // kernel, hw_context and xclbin belong to the backend instance.
     // The physical xrt::device remains owned by the static device context.
@@ -988,15 +1125,64 @@ static ggml_backend_t ggml_backend_xdna_device_init(
         return nullptr;
     }
 
+    ggml_backend_xdna_kernel_profile requested_profile =
+        ggml_backend_xdna_kernel_profile::none;
+
+    std::string xclbin_path;
+
+    if (!ggml_backend_xdna_parse_init_params(
+            params,
+            &requested_profile,
+            &xclbin_path)) {
+        return nullptr;
+    }
+
+    if (device_ctx->active_backend_count != 0 &&
+        device_ctx->active_profile != requested_profile) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: cannot initialize profile '%s'; "
+            "device already has %zu backend instance(s) using profile '%s'\n",
+            ggml_backend_xdna_kernel_profile_name(requested_profile),
+            device_ctx->active_backend_count,
+            ggml_backend_xdna_kernel_profile_name(
+                device_ctx->active_profile));
+        return nullptr;
+    }
+
     auto * backend_ctx =
         new ggml_backend_xdna_backend_context;
 
     backend_ctx->device_context = device_ctx;
+    backend_ctx->kernel_profile = requested_profile;
 
-    if (!ggml_backend_xdna_init_kernel(backend_ctx, params)) {
+    const char * kernel_params =
+        xclbin_path.empty()
+            ? nullptr
+            : xclbin_path.c_str();
+
+    if (!ggml_backend_xdna_init_kernel(
+            backend_ctx,
+            kernel_params)) {
         delete backend_ctx;
         return nullptr;
     }
+
+    if (device_ctx->active_backend_count == 0) {
+        device_ctx->active_profile =
+            requested_profile;
+    }
+
+    ++device_ctx->active_backend_count;
+    backend_ctx->device_profile_registered = true;
+
+    std::fprintf(
+        stderr,
+        "ggml_xdna: backend profile '%s' registered "
+        "(%zu active instance(s))\n",
+        ggml_backend_xdna_kernel_profile_name(
+            requested_profile),
+        device_ctx->active_backend_count);
 
     return new ggml_backend {
         /* .guid    = */ ggml_backend_xdna_guid(),
