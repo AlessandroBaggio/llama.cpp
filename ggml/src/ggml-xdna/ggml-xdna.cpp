@@ -370,6 +370,127 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
     const struct ggml_tensor * src0 = node->src[0];
     const struct ggml_tensor * src1 = node->src[1];
 
+    // Controlled Q4_K graph path.
+    //
+    // This intentionally does not change supports_op().
+    // It can only be reached when graph_compute() is invoked
+    // directly on an XDNA backend initialized with the
+    // K=2560 Q4_K x Q8_K artifact.
+    if (src0->type == GGML_TYPE_Q4_K) {
+        constexpr int64_t k = 2560;
+
+        constexpr size_t q4_native_row_bytes =
+            10 * sizeof(block_q4_K);
+
+        constexpr size_t f32_activation_bytes =
+            static_cast<size_t>(k) * sizeof(float);
+
+        if (src1->type != GGML_TYPE_F32 ||
+            node->type != GGML_TYPE_F32) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: controlled Q4_K MUL_MAT requires Q4_K x F32 -> F32\n");
+            return GGML_STATUS_FAILED;
+        }
+
+        if (src0->ne[0] != k ||
+            src0->ne[1] != 1 ||
+            src0->ne[2] != 1 ||
+            src0->ne[3] != 1 ||
+            src1->ne[0] != k ||
+            src1->ne[1] != 1 ||
+            src1->ne[2] != 1 ||
+            src1->ne[3] != 1 ||
+            node->ne[0] != 1 ||
+            node->ne[1] != 1 ||
+            node->ne[2] != 1 ||
+            node->ne[3] != 1) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: controlled Q4_K MUL_MAT requires [2560,1] x [2560,1] -> [1,1]\n");
+            return GGML_STATUS_FAILED;
+        }
+
+        if (!ggml_is_contiguous(src0) ||
+            !ggml_is_contiguous(src1) ||
+            !ggml_is_contiguous(node)) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: controlled Q4_K MUL_MAT requires contiguous tensors\n");
+            return GGML_STATUS_FAILED;
+        }
+
+        if (src0->data == nullptr ||
+            src1->data == nullptr ||
+            node->data == nullptr) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: controlled Q4_K MUL_MAT requires host-accessible tensor data\n");
+            return GGML_STATUS_FAILED;
+        }
+
+        const size_t actual_q4_bytes =
+            ggml_nbytes(src0);
+
+        const size_t actual_src1_bytes =
+            ggml_nbytes(src1);
+
+        const size_t actual_dst_bytes =
+            ggml_nbytes(node);
+
+        if (actual_q4_bytes != q4_native_row_bytes ||
+            actual_src1_bytes != f32_activation_bytes ||
+            actual_dst_bytes != sizeof(float)) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: controlled Q4_K MUL_MAT has unexpected tensor byte sizes\n");
+            return GGML_STATUS_FAILED;
+        }
+
+        auto * ctx =
+            static_cast<ggml_backend_xdna_backend_context *>(
+                backend->context);
+
+        if (ctx == nullptr ||
+            !ggml_backend_xdna_load_instructions(ctx)) {
+            return GGML_STATUS_FAILED;
+        }
+
+        const auto * activations =
+            static_cast<const float *>(
+                src1->data);
+
+        auto * result =
+            static_cast<float *>(
+                node->data);
+
+        std::fprintf(
+            stderr,
+            "ggml_xdna: controlled Q4_K K=2560 MUL_MAT graph accepted\n");
+
+        if (!ggml_backend_xdna_run_q4k_q8k_k2560(
+                backend,
+                ctx->instructions.data(),
+                static_cast<uint32_t>(
+                    ctx->instructions.size()),
+                src0->data,
+                actual_q4_bytes,
+                activations,
+                static_cast<size_t>(k),
+                result)) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: controlled Q4_K K=2560 MUL_MAT execution failed\n");
+            return GGML_STATUS_FAILED;
+        }
+
+        std::fprintf(
+            stderr,
+            "ggml_xdna: controlled Q4_K K=2560 MUL_MAT executed on XDNA\n");
+
+        return GGML_STATUS_SUCCESS;
+    }
+
     if (src0->type != GGML_TYPE_I16 ||
         src1->type != GGML_TYPE_I16 ||
         node->type != GGML_TYPE_F32) {
