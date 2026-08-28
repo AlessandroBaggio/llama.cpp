@@ -1212,7 +1212,13 @@ static ggml_backend_buffer_t ggml_backend_xdna_device_buffer_from_host_ptr(
 static bool ggml_backend_xdna_device_supports_op(
         ggml_backend_dev_t dev,
         const struct ggml_tensor * op) {
-    (void) dev;
+    const ggml_backend_xdna_context * device_ctx =
+        ggml_backend_xdna_get_context(dev);
+
+    if (device_ctx == nullptr ||
+        device_ctx->active_backend_count == 0) {
+        return false;
+    }
 
     if (op == nullptr ||
         op->op != GGML_OP_MUL_MAT ||
@@ -1224,32 +1230,72 @@ static bool ggml_backend_xdna_device_supports_op(
     const struct ggml_tensor * src0 = op->src[0];
     const struct ggml_tensor * src1 = op->src[1];
 
-    if (src0->type != GGML_TYPE_I16 ||
-        src1->type != GGML_TYPE_I16 ||
-        op->type != GGML_TYPE_F32) {
-        return false;
+    switch (device_ctx->active_profile) {
+        case ggml_backend_xdna_kernel_profile::none:
+            // Plain-path/direct-probe mode intentionally does not
+            // advertise operations to the scheduler.
+            return false;
+
+        case ggml_backend_xdna_kernel_profile::i16_256: {
+            if (src0->type != GGML_TYPE_I16 ||
+                src1->type != GGML_TYPE_I16 ||
+                op->type != GGML_TYPE_F32) {
+                return false;
+            }
+
+            constexpr int64_t size = 256;
+
+            if (src0->ne[0] != size ||
+                src0->ne[1] != size ||
+                src0->ne[2] != 1 ||
+                src0->ne[3] != 1 ||
+                src1->ne[0] != size ||
+                src1->ne[1] != size ||
+                src1->ne[2] != 1 ||
+                src1->ne[3] != 1 ||
+                op->ne[0] != size ||
+                op->ne[1] != size ||
+                op->ne[2] != 1 ||
+                op->ne[3] != 1) {
+                return false;
+            }
+
+            return ggml_is_contiguous(src0) &&
+                   ggml_is_contiguous(src1) &&
+                   ggml_is_contiguous(op);
+        }
+
+        case ggml_backend_xdna_kernel_profile::q4k_q8k_k2560: {
+            if (src0->type != GGML_TYPE_Q4_K ||
+                src1->type != GGML_TYPE_F32 ||
+                op->type != GGML_TYPE_F32) {
+                return false;
+            }
+
+            constexpr int64_t k = 2560;
+
+            if (src0->ne[0] != k ||
+                src0->ne[1] != 1 ||
+                src0->ne[2] != 1 ||
+                src0->ne[3] != 1 ||
+                src1->ne[0] != k ||
+                src1->ne[1] != 1 ||
+                src1->ne[2] != 1 ||
+                src1->ne[3] != 1 ||
+                op->ne[0] != 1 ||
+                op->ne[1] != 1 ||
+                op->ne[2] != 1 ||
+                op->ne[3] != 1) {
+                return false;
+            }
+
+            return ggml_is_contiguous(src0) &&
+                   ggml_is_contiguous(src1) &&
+                   ggml_is_contiguous(op);
+        }
     }
 
-    constexpr int64_t size = 256;
-
-    if (src0->ne[0] != size ||
-        src0->ne[1] != size ||
-        src0->ne[2] != 1 ||
-        src0->ne[3] != 1 ||
-        src1->ne[0] != size ||
-        src1->ne[1] != size ||
-        src1->ne[2] != 1 ||
-        src1->ne[3] != 1 ||
-        op->ne[0] != size ||
-        op->ne[1] != size ||
-        op->ne[2] != 1 ||
-        op->ne[3] != 1) {
-        return false;
-    }
-
-    return ggml_is_contiguous(src0) &&
-           ggml_is_contiguous(src1) &&
-           ggml_is_contiguous(op);
+    return false;
 }
 
 static bool ggml_backend_xdna_device_supports_buft(
