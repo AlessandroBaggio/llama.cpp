@@ -71,6 +71,21 @@ struct ggml_backend_xdna_backend_context {
     std::unique_ptr<xrt::xclbin> xclbin;
     std::unique_ptr<xrt::hw_context> hw_context;
     std::unique_ptr<xrt::kernel> kernel;
+
+    // Persistent Q4_K K=2560 BOs. They belong to this backend/XRT
+    // context and are released automatically when the backend is freed.
+    std::unique_ptr<xrt::bo> q4_bo_instr;
+    std::unique_ptr<xrt::bo> q4_bo_q4;
+    std::unique_ptr<xrt::bo> q4_bo_q8;
+    std::unique_ptr<xrt::bo> q4_bo_out;
+
+    void * q4_buf_instr = nullptr;
+    void * q4_buf_q4 = nullptr;
+    void * q4_buf_q8 = nullptr;
+    float * q4_buf_out = nullptr;
+
+    uint32_t q4_instruction_count = 0;
+    bool q4_bos_initialized = false;
 };
 
 static ggml_backend_xdna_context ggml_backend_xdna_create_context() {
@@ -1280,45 +1295,102 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560(
         xrt::kernel & kernel =
             *ctx->kernel;
 
-        xrt::bo bo_instr(
-            device,
+        const size_t instruction_bytes =
             static_cast<size_t>(instruction_count) *
-                sizeof(uint32_t),
-            XCL_BO_FLAGS_CACHEABLE,
-            kernel.group_id(1));
+                sizeof(uint32_t);
 
-        xrt::bo bo_q4(
-            device,
-            q4_transport_row_bytes,
-            XRT_BO_FLAGS_HOST_ONLY,
-            kernel.group_id(3));
+        if (!ctx->q4_bos_initialized) {
+            auto bo_instr = std::make_unique<xrt::bo>(
+                device,
+                instruction_bytes,
+                XCL_BO_FLAGS_CACHEABLE,
+                kernel.group_id(1));
 
-        xrt::bo bo_q8(
-            device,
-            q8_row_bytes,
-            XRT_BO_FLAGS_HOST_ONLY,
-            kernel.group_id(4));
+            auto bo_q4 = std::make_unique<xrt::bo>(
+                device,
+                q4_transport_row_bytes,
+                XRT_BO_FLAGS_HOST_ONLY,
+                kernel.group_id(3));
 
-        xrt::bo bo_out(
-            device,
-            sizeof(float),
-            XRT_BO_FLAGS_HOST_ONLY,
-            kernel.group_id(5));
+            auto bo_q8 = std::make_unique<xrt::bo>(
+                device,
+                q8_row_bytes,
+                XRT_BO_FLAGS_HOST_ONLY,
+                kernel.group_id(4));
 
-        void * buf_instr =
-            bo_instr.map<void *>();
+            auto bo_out = std::make_unique<xrt::bo>(
+                device,
+                sizeof(float),
+                XRT_BO_FLAGS_HOST_ONLY,
+                kernel.group_id(5));
 
-        std::memcpy(
-            buf_instr,
-            instructions,
-            static_cast<size_t>(instruction_count) *
-                sizeof(uint32_t));
+            void * buf_instr =
+                bo_instr->map<void *>();
 
-        bo_instr.sync(
-            XCL_BO_SYNC_BO_TO_DEVICE);
+            void * buf_q4 =
+                bo_q4->map<void *>();
+
+            void * buf_q8 =
+                bo_q8->map<void *>();
+
+            float * buf_out =
+                bo_out->map<float *>();
+
+            std::memcpy(
+                buf_instr,
+                instructions,
+                instruction_bytes);
+
+            bo_instr->sync(
+                XCL_BO_SYNC_BO_TO_DEVICE);
+
+            ctx->q4_bo_instr = std::move(bo_instr);
+            ctx->q4_bo_q4 = std::move(bo_q4);
+            ctx->q4_bo_q8 = std::move(bo_q8);
+            ctx->q4_bo_out = std::move(bo_out);
+
+            ctx->q4_buf_instr = buf_instr;
+            ctx->q4_buf_q4 = buf_q4;
+            ctx->q4_buf_q8 = buf_q8;
+            ctx->q4_buf_out = buf_out;
+
+            ctx->q4_instruction_count =
+                instruction_count;
+
+            ctx->q4_bos_initialized = true;
+        }
+        else if (
+            ctx->q4_instruction_count != instruction_count ||
+            std::memcmp(
+                ctx->q4_buf_instr,
+                instructions,
+                instruction_bytes) != 0) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: persistent Q4_K BO instruction mismatch\n");
+            return false;
+        }
+
+        xrt::bo & bo_instr =
+            *ctx->q4_bo_instr;
+
+        xrt::bo & bo_q4 =
+            *ctx->q4_bo_q4;
+
+        xrt::bo & bo_q8 =
+            *ctx->q4_bo_q8;
+
+        xrt::bo & bo_out =
+            *ctx->q4_bo_out;
 
         void * buf_q4 =
-            bo_q4.map<void *>();
+            ctx->q4_buf_q4;
+
+        void * buf_q8 =
+            ctx->q4_buf_q8;
+
+        float * buf_out =
+            ctx->q4_buf_out;
 
         std::memcpy(
             buf_q4,
@@ -1328,9 +1400,6 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560(
         bo_q4.sync(
             XCL_BO_SYNC_BO_TO_DEVICE);
 
-        void * buf_q8 =
-            bo_q8.map<void *>();
-
         std::memcpy(
             buf_q8,
             q8_blocks.data(),
@@ -1338,9 +1407,6 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560(
 
         bo_q8.sync(
             XCL_BO_SYNC_BO_TO_DEVICE);
-
-        float * buf_out =
-            bo_out.map<float *>();
 
         *buf_out = 0.0f;
 
