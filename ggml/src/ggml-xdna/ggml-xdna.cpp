@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdlib>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -571,10 +572,10 @@ ggml_backend_xdna_kernel_profile_xclbin_sha256_matches(
     static constexpr unsigned char
         q4k_q8k_k2560_sha256[
             GGML_XDNA_SHA256_DIGEST_SIZE] = {
-        0x3c, 0xbb, 0xa5, 0x0c, 0xb8, 0xa7, 0x1c, 0xc3,
-        0x8b, 0xf2, 0x7f, 0x81, 0xa4, 0x6c, 0x03, 0x48,
-        0x80, 0xed, 0xd9, 0x46, 0x45, 0x51, 0x7a, 0xc3,
-        0xd2, 0x9f, 0x8d, 0xd6, 0x04, 0x47, 0xa6, 0x0a,
+        0xe6, 0xba, 0x92, 0xbf, 0x3e, 0xa6, 0xed, 0x35,
+        0x70, 0x77, 0xb7, 0xc8, 0x36, 0xd5, 0x3e, 0x78,
+        0x4b, 0xc3, 0xa4, 0xf1, 0x5f, 0x79, 0x31, 0x20,
+        0xb8, 0xf3, 0xb9, 0x6f, 0x56, 0xec, 0xc6, 0x8f,
     };
 
     switch (profile) {
@@ -789,21 +790,20 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560(
         size_t activation_elements,
         float * result);
 
-static enum ggml_status ggml_backend_xdna_graph_compute(
+static bool ggml_backend_xdna_is_view_op(enum ggml_op op) {
+    return
+        op == GGML_OP_VIEW ||
+        op == GGML_OP_RESHAPE ||
+        op == GGML_OP_PERMUTE ||
+        op == GGML_OP_TRANSPOSE;
+}
+
+static enum ggml_status ggml_backend_xdna_graph_compute_single_node(
         ggml_backend_t backend,
-        struct ggml_cgraph * cgraph) {
-    if (backend == nullptr || cgraph == nullptr) {
+        struct ggml_tensor * node) {
+    if (backend == nullptr) {
         return GGML_STATUS_FAILED;
     }
-
-    if (ggml_graph_n_nodes(cgraph) != 1) {
-        std::fprintf(
-            stderr,
-            "ggml_xdna: controlled graph path requires exactly one node\n");
-        return GGML_STATUS_FAILED;
-    }
-
-    struct ggml_tensor * node = ggml_graph_node(cgraph, 0);
 
     if (node == nullptr ||
         node->op != GGML_OP_MUL_MAT ||
@@ -841,21 +841,23 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
             return GGML_STATUS_FAILED;
         }
 
+        const int64_t m = src0->ne[1];
+
         if (src0->ne[0] != k ||
-            src0->ne[1] != 1 ||
+            m <= 0 ||
             src0->ne[2] != 1 ||
             src0->ne[3] != 1 ||
             src1->ne[0] != k ||
             src1->ne[1] != 1 ||
             src1->ne[2] != 1 ||
             src1->ne[3] != 1 ||
-            node->ne[0] != 1 ||
+            node->ne[0] != m ||
             node->ne[1] != 1 ||
             node->ne[2] != 1 ||
             node->ne[3] != 1) {
             std::fprintf(
                 stderr,
-                "ggml_xdna: controlled Q4_K MUL_MAT requires [2560,1] x [2560,1] -> [1,1]\n");
+                "ggml_xdna: controlled Q4_K MUL_MAT requires [2560,M] x [2560,1] -> [M,1]\n");
             return GGML_STATUS_FAILED;
         }
 
@@ -868,6 +870,15 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
             return GGML_STATUS_FAILED;
         }
 
+        if (src0->nb[1] != q4_native_row_bytes ||
+            src1->nb[1] != f32_activation_bytes ||
+            node->nb[0] != sizeof(float)) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: controlled Q4_K MUL_MAT has unexpected tensor strides\n");
+            return GGML_STATUS_FAILED;
+        }
+
         if (src0->data == nullptr ||
             src1->data == nullptr ||
             node->data == nullptr) {
@@ -876,6 +887,15 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
                 "ggml_xdna: controlled Q4_K MUL_MAT requires host-accessible tensor data\n");
             return GGML_STATUS_FAILED;
         }
+
+        const size_t rows =
+            static_cast<size_t>(m);
+
+        const size_t expected_q4_bytes =
+            rows * q4_native_row_bytes;
+
+        const size_t expected_dst_bytes =
+            rows * sizeof(float);
 
         const size_t actual_q4_bytes =
             ggml_nbytes(src0);
@@ -886,9 +906,9 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
         const size_t actual_dst_bytes =
             ggml_nbytes(node);
 
-        if (actual_q4_bytes != q4_native_row_bytes ||
+        if (actual_q4_bytes != expected_q4_bytes ||
             actual_src1_bytes != f32_activation_bytes ||
-            actual_dst_bytes != sizeof(float)) {
+            actual_dst_bytes != expected_dst_bytes) {
             std::fprintf(
                 stderr,
                 "ggml_xdna: controlled Q4_K MUL_MAT has unexpected tensor byte sizes\n");
@@ -904,6 +924,10 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
             return GGML_STATUS_FAILED;
         }
 
+        const auto * q4_rows =
+            static_cast<const uint8_t *>(
+                src0->data);
+
         const auto * activations =
             static_cast<const float *>(
                 src1->data);
@@ -914,27 +938,42 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
 
         std::fprintf(
             stderr,
-            "ggml_xdna: controlled Q4_K K=2560 MUL_MAT graph accepted\n");
+            "ggml_xdna: controlled Q4_K K=2560 MUL_MAT graph accepted for M=%lld\n",
+            static_cast<long long>(m));
 
-        if (!ggml_backend_xdna_run_q4k_q8k_k2560(
-                backend,
-                ctx->instructions.data(),
-                static_cast<uint32_t>(
-                    ctx->instructions.size()),
-                src0->data,
-                actual_q4_bytes,
-                activations,
-                static_cast<size_t>(k),
-                result)) {
-            std::fprintf(
-                stderr,
-                "ggml_xdna: controlled Q4_K K=2560 MUL_MAT execution failed\n");
-            return GGML_STATUS_FAILED;
+        // Correctness-first multi-row path.
+        //
+        // The current primitive computes one K=2560 dot product.
+        // Execute one weight row at a time. This intentionally
+        // re-quantizes/re-uploads the shared activation for each row;
+        // activation reuse is a later performance optimization.
+        for (size_t row = 0; row < rows; ++row) {
+            const void * q4_row =
+                q4_rows +
+                row * q4_native_row_bytes;
+
+            if (!ggml_backend_xdna_run_q4k_q8k_k2560(
+                    backend,
+                    ctx->instructions.data(),
+                    static_cast<uint32_t>(
+                        ctx->instructions.size()),
+                    q4_row,
+                    q4_native_row_bytes,
+                    activations,
+                    static_cast<size_t>(k),
+                    &result[row])) {
+                std::fprintf(
+                    stderr,
+                    "ggml_xdna: controlled Q4_K K=2560 MUL_MAT execution failed at row %zu\n",
+                    row);
+                return GGML_STATUS_FAILED;
+            }
         }
 
         std::fprintf(
             stderr,
-            "ggml_xdna: controlled Q4_K K=2560 MUL_MAT executed on XDNA\n");
+            "ggml_xdna: controlled Q4_K K=2560 MUL_MAT executed on XDNA for M=%lld\n",
+            static_cast<long long>(m));
 
         return GGML_STATUS_SUCCESS;
     }
@@ -1047,6 +1086,72 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
     std::fprintf(
         stderr,
         "ggml_xdna: controlled 256x256 I16 MUL_MAT executed on XDNA\n");
+
+    return GGML_STATUS_SUCCESS;
+}
+
+static enum ggml_status ggml_backend_xdna_graph_compute(
+        ggml_backend_t backend,
+        struct ggml_cgraph * cgraph) {
+    if (backend == nullptr || cgraph == nullptr) {
+        return GGML_STATUS_FAILED;
+    }
+
+    const int n_nodes =
+        ggml_graph_n_nodes(cgraph);
+
+    if (n_nodes == 0) {
+        return GGML_STATUS_SUCCESS;
+    }
+
+    int compute_nodes = 0;
+    int view_nodes = 0;
+
+    for (int i = 0; i < n_nodes; ++i) {
+        struct ggml_tensor * node =
+            ggml_graph_node(
+                cgraph,
+                i);
+
+        if (node == nullptr) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: null graph node at index %d\n",
+                i);
+            return GGML_STATUS_FAILED;
+        }
+
+        // Keep this classification exactly aligned with the GGML
+        // scheduler's private ggml_is_view_op() helper.
+        if (ggml_backend_xdna_is_view_op(node->op)) {
+            ++view_nodes;
+            continue;
+        }
+
+        const enum ggml_status status =
+            ggml_backend_xdna_graph_compute_single_node(
+                backend,
+                node);
+
+        if (status != GGML_STATUS_SUCCESS) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: graph node %d failed "
+                "(op=%d)\n",
+                i,
+                static_cast<int>(node->op));
+            return status;
+        }
+
+        ++compute_nodes;
+    }
+
+    std::fprintf(
+        stderr,
+        "ggml_xdna: graph dispatch complete: "
+        "%d compute node(s), %d view node(s) skipped\n",
+        compute_nodes,
+        view_nodes);
 
     return GGML_STATUS_SUCCESS;
 }
@@ -1487,13 +1592,29 @@ static ggml_backend_t ggml_backend_xdna_device_init(
         return nullptr;
     }
 
+    const char * resolved_params = params;
+
+    // Normal llama.cpp backend initialization passes nullptr.
+    // Allow an XDNA-specific opt-in without changing generic llama
+    // initialization or command-line parameter plumbing.
+    //
+    // Explicit non-empty backend params always take precedence.
+    if (resolved_params == nullptr || resolved_params[0] == '\0') {
+        const char * env_params =
+            std::getenv("GGML_XDNA_BACKEND_PARAMS");
+
+        if (env_params != nullptr && env_params[0] != '\0') {
+            resolved_params = env_params;
+        }
+    }
+
     ggml_backend_xdna_kernel_profile requested_profile =
         ggml_backend_xdna_kernel_profile::none;
 
     std::string xclbin_path;
 
     if (!ggml_backend_xdna_parse_init_params(
-            params,
+            resolved_params,
             &requested_profile,
             &xclbin_path)) {
         return nullptr;
@@ -1648,24 +1769,51 @@ static bool ggml_backend_xdna_device_supports_op(
 
             constexpr int64_t k = 2560;
 
+            constexpr size_t q4_native_row_bytes =
+                10 * sizeof(block_q4_K);
+
+            constexpr size_t f32_activation_bytes =
+                static_cast<size_t>(k) * sizeof(float);
+
+            const int64_t m = src0->ne[1];
+
             if (src0->ne[0] != k ||
-                src0->ne[1] != 1 ||
+                m <= 0 ||
                 src0->ne[2] != 1 ||
                 src0->ne[3] != 1 ||
                 src1->ne[0] != k ||
                 src1->ne[1] != 1 ||
                 src1->ne[2] != 1 ||
                 src1->ne[3] != 1 ||
-                op->ne[0] != 1 ||
+                op->ne[0] != m ||
                 op->ne[1] != 1 ||
                 op->ne[2] != 1 ||
                 op->ne[3] != 1) {
                 return false;
             }
 
-            return ggml_is_contiguous(src0) &&
-                   ggml_is_contiguous(src1) &&
-                   ggml_is_contiguous(op);
+            if (!ggml_is_contiguous(src0) ||
+                !ggml_is_contiguous(src1) ||
+                !ggml_is_contiguous(op)) {
+                return false;
+            }
+
+            if (src0->nb[1] != q4_native_row_bytes ||
+                src1->nb[1] != f32_activation_bytes ||
+                op->nb[0] != sizeof(float)) {
+                return false;
+            }
+
+            const size_t rows =
+                static_cast<size_t>(m);
+
+            return
+                ggml_nbytes(src0) ==
+                    rows * q4_native_row_bytes &&
+                ggml_nbytes(src1) ==
+                    f32_activation_bytes &&
+                ggml_nbytes(op) ==
+                    rows * sizeof(float);
         }
     }
 
