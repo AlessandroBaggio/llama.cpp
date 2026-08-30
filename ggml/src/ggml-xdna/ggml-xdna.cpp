@@ -21,6 +21,8 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <chrono>
+#include <unordered_map>
 
 enum class ggml_backend_xdna_kernel_profile {
     none,
@@ -55,6 +57,94 @@ struct ggml_backend_xdna_context {
     size_t active_backend_count = 0;
 };
 
+
+// Persistent host-side Q4_K -> 152-byte transport cache.
+//
+// This cache exists to test ONE variable: eliminating repeated CPU-side
+// native Q4_K -> transport conversion for immutable model weight tensors
+// across tokens. It intentionally does NOT change Q4 BO sync/XRT/output
+// behavior: a cache hit still ends up producing the exact same bytes in
+// the existing mapped Q4 execution BO, followed by the same sync/run/
+// wait/output path as a cache miss.
+//
+// Keyed by the q4 source tensor data pointer (stable for the lifetime of
+// an immutable weight tensor within one model/context), validated against
+// M, native byte size and transport byte size to reject stale/incorrect
+// reuse if a pointer were ever recycled for a different tensor.
+struct ggml_backend_xdna_q4_cache_entry {
+    size_t m = 0;
+    size_t native_bytes = 0;
+    size_t transport_bytes = 0;
+    std::vector<uint8_t> transport;
+};
+
+enum class ggml_backend_xdna_q4_shape {
+    m9216,
+    m4096,
+    m8192,
+    m1024,
+};
+
+struct ggml_backend_xdna_q4_transport_cache {
+    bool enabled = false;
+    bool env_checked = false;
+
+    std::unordered_map<const void *, ggml_backend_xdna_q4_cache_entry> entries;
+
+    uint64_t hits = 0;
+    uint64_t misses = 0;
+
+    uint64_t hits_m9216 = 0;
+    uint64_t hits_m4096 = 0;
+    uint64_t hits_m8192 = 0;
+    uint64_t hits_m1024 = 0;
+
+    uint64_t blocks_converted = 0;
+    uint64_t native_bytes_converted = 0;
+    uint64_t transport_bytes_generated = 0;
+    uint64_t transport_bytes_copied = 0;
+};
+
+// Minimal accumulated per-token-run timers (milliseconds), summed across
+// all accepted Q4 nodes for the process lifetime. Diagnostic only.
+struct ggml_backend_xdna_timers {
+    double q4_conversion_ms = 0.0;
+    double q4_cached_memcpy_ms = 0.0;
+    double q4_sync_ms = 0.0;
+    double q8_quant_ms = 0.0;
+    double q8_sync_ms = 0.0;
+    double xrt_submit_wait_ms = 0.0;
+    double output_ms = 0.0;
+};
+
+struct ggml_backend_xdna_shape_timing {
+    uint64_t ops = 0;
+    double submit_ms = 0.0;
+    double wait_ms = 0.0;
+};
+
+static bool ggml_backend_xdna_env_flag_enabled(const char * name) {
+    const char * v = std::getenv(name);
+    if (v == nullptr || v[0] == '\0') {
+        return false;
+    }
+    return std::strcmp(v, "0") != 0;
+}
+
+struct ggml_backend_xdna_batched_state {
+    size_t rows = 0;
+    std::string xclbin_path;
+    std::vector<uint32_t> instructions;
+    std::unique_ptr<xrt::xclbin> xclbin;
+    std::unique_ptr<xrt::hw_context> hw_context;
+    std::unique_ptr<xrt::kernel> kernel;
+    std::unique_ptr<xrt::bo> bo_instr, bo_q4, bo_q8, bo_out;
+    void * buf_instr = nullptr, * buf_q4 = nullptr, * buf_q8 = nullptr;
+    float * buf_out = nullptr;
+    uint32_t instruction_count = 0;
+    bool bos_initialized = false;
+    bool available = false;
+};
 struct ggml_backend_xdna_backend_context {
     ggml_backend_xdna_context * device_context = nullptr;
 
@@ -113,7 +203,23 @@ struct ggml_backend_xdna_backend_context {
     uint32_t q4_m9216_instruction_count = 0;
     bool q4_m9216_bos_initialized = false;
     bool q4_m9216_available = false;
+
+    ggml_backend_xdna_batched_state q4_m1024;
+    ggml_backend_xdna_batched_state q4_m4096;
+    ggml_backend_xdna_batched_state q4_m8192;
+    uint64_t accepted_q4_nodes = 0;
+    uint64_t batched_m9216 = 0, batched_m4096 = 0, batched_m8192 = 0, batched_m1024 = 0;
+    uint64_t fallback_rows = 0, xrt_runs = 0, run_waits = 0;
+    uint64_t q4_to_device = 0, q8_to_device = 0, output_from_device = 0;
+
+    // Persistent Q4_K transport cache (experimental, off by default).
+    // See GGML_XDNA_Q4K_TRANSPORT_CACHE. Owned by the backend/model-
+    // context lifetime, matching q4_m9216_* and q4_m{1024,4096,8192} BOs.
+    ggml_backend_xdna_q4_transport_cache q4_cache;
+    ggml_backend_xdna_timers timers;
+    ggml_backend_xdna_shape_timing shape_timing[4];
 };
+
 
 static ggml_backend_xdna_context ggml_backend_xdna_create_context() {
     ggml_backend_xdna_context ctx;
@@ -789,6 +895,50 @@ static void ggml_backend_xdna_free(ggml_backend_t backend) {
         ctx->device_profile_registered = false;
     }
 
+    if (ctx != nullptr && ctx->kernel_profile == ggml_backend_xdna_kernel_profile::q4k_q8k_k2560) {
+        std::fprintf(stderr, "ggml_xdna: ledger accepted=%llu batched_m9216=%llu batched_m4096=%llu batched_m8192=%llu batched_m1024=%llu fallback=%llu xrt_runs=%llu run_waits=%llu q4_to_device=%llu q8_to_device=%llu output_from_device=%llu\n",
+            static_cast<unsigned long long>(ctx->accepted_q4_nodes), static_cast<unsigned long long>(ctx->batched_m9216), static_cast<unsigned long long>(ctx->batched_m4096), static_cast<unsigned long long>(ctx->batched_m8192), static_cast<unsigned long long>(ctx->batched_m1024), static_cast<unsigned long long>(ctx->fallback_rows), static_cast<unsigned long long>(ctx->xrt_runs), static_cast<unsigned long long>(ctx->run_waits), static_cast<unsigned long long>(ctx->q4_to_device), static_cast<unsigned long long>(ctx->q8_to_device), static_cast<unsigned long long>(ctx->output_from_device));
+    }
+
+    if (ctx != nullptr && ctx->kernel_profile == ggml_backend_xdna_kernel_profile::q4k_q8k_k2560) {
+        size_t cache_bytes_total = 0;
+        for (const auto & kv : ctx->q4_cache.entries) {
+            cache_bytes_total += kv.second.transport.size();
+        }
+
+        std::fprintf(stderr,
+            "ggml_xdna: q4_cache enabled=%d entries=%zu bytes=%zu hits=%llu misses=%llu hits_m9216=%llu hits_m4096=%llu hits_m8192=%llu hits_m1024=%llu blocks_converted=%llu native_bytes_converted=%llu transport_bytes_generated=%llu transport_bytes_copied=%llu\n",
+            ctx->q4_cache.enabled ? 1 : 0,
+            ctx->q4_cache.entries.size(),
+            cache_bytes_total,
+            static_cast<unsigned long long>(ctx->q4_cache.hits),
+            static_cast<unsigned long long>(ctx->q4_cache.misses),
+            static_cast<unsigned long long>(ctx->q4_cache.hits_m9216),
+            static_cast<unsigned long long>(ctx->q4_cache.hits_m4096),
+            static_cast<unsigned long long>(ctx->q4_cache.hits_m8192),
+            static_cast<unsigned long long>(ctx->q4_cache.hits_m1024),
+            static_cast<unsigned long long>(ctx->q4_cache.blocks_converted),
+            static_cast<unsigned long long>(ctx->q4_cache.native_bytes_converted),
+            static_cast<unsigned long long>(ctx->q4_cache.transport_bytes_generated),
+            static_cast<unsigned long long>(ctx->q4_cache.transport_bytes_copied));
+
+        std::fprintf(stderr,
+            "ggml_xdna: timers_ms q4_conversion=%.3f q4_cached_memcpy=%.3f q4_sync=%.3f q8_quant=%.3f q8_sync=%.3f xrt_submit_wait=%.3f output=%.3f\n",
+            ctx->timers.q4_conversion_ms,
+            ctx->timers.q4_cached_memcpy_ms,
+            ctx->timers.q4_sync_ms,
+            ctx->timers.q8_quant_ms,
+            ctx->timers.q8_sync_ms,
+            ctx->timers.xrt_submit_wait_ms,
+            ctx->timers.output_ms);
+    }
+
+        static const char * shape_names[] = {"M9216", "M4096", "M8192", "M1024"};
+        for (size_t i = 0; i < 4; ++i) {
+            const auto & t = ctx->shape_timing[i];
+            std::fprintf(stderr, "ggml_xdna: xrt_shape=%s ops=%llu submit_ms=%.3f submit_avg_ms=%.6f wait_ms=%.3f wait_avg_ms=%.6f combined_ms=%.3f\n", shape_names[i], static_cast<unsigned long long>(t.ops), t.submit_ms, t.ops ? t.submit_ms / t.ops : 0.0, t.wait_ms, t.ops ? t.wait_ms / t.ops : 0.0, t.submit_ms + t.wait_ms);
+        }
+
     // kernel, hw_context and xclbin belong to the backend instance.
     // The physical xrt::device remains owned by the static device context.
     delete ctx;
@@ -816,6 +966,11 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560(
         size_t activation_elements,
         bool refresh_activation,
         float * result);
+
+static bool ggml_backend_xdna_run_batched_shape(
+        ggml_backend_xdna_backend_context * ctx, ggml_backend_xdna_batched_state & state,
+        const void * q4_rows, size_t q4_rows_bytes, const float * activations,
+        size_t activation_elements, float * result, size_t result_bytes);
 
 static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
         ggml_backend_t backend,
@@ -977,6 +1132,7 @@ static enum ggml_status ggml_backend_xdna_graph_compute_single_node(
             "ggml_xdna: controlled Q4_K K=2560 MUL_MAT graph accepted for M=%lld\n",
             static_cast<long long>(m));
 
+        ++ctx->accepted_q4_nodes;
         if (m == 9216 &&
             ctx->q4_m9216_available) {
             if (!ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
@@ -997,10 +1153,20 @@ static enum ggml_status ggml_backend_xdna_graph_compute_single_node(
                 stderr,
                 "ggml_xdna: controlled Q4_K K=2560 MUL_MAT executed via M=9216 multi-row fast path\n");
 
+            ++ctx->batched_m9216;
+            return GGML_STATUS_SUCCESS;
+        }
+        if ((m == 1024 && ctx->q4_m1024.available) || (m == 4096 && ctx->q4_m4096.available) || (m == 8192 && ctx->q4_m8192.available)) {
+            auto & state = m == 1024 ? ctx->q4_m1024 : (m == 4096 ? ctx->q4_m4096 : ctx->q4_m8192);
+            if (!ggml_backend_xdna_run_batched_shape(ctx, state, q4_rows, expected_q4_bytes, activations, static_cast<size_t>(k), result, expected_dst_bytes)) return GGML_STATUS_FAILED;
+            if (m == 1024) ++ctx->batched_m1024; else if (m == 4096) ++ctx->batched_m4096; else ++ctx->batched_m8192;
+            std::fprintf(stderr, "ggml_xdna: controlled Q4_K K=2560 MUL_MAT executed via M=%lld batched fast path\n", static_cast<long long>(m));
             return GGML_STATUS_SUCCESS;
         }
 
+
         // Fallback primitive: one K=2560 dot product per launch.
+        ++ctx->fallback_rows;
         // Quantize/upload the shared activation on the first row, then
         // reuse the persistent Q8_K BO for all remaining rows.
         for (size_t row = 0; row < rows; ++row) {
@@ -1342,6 +1508,236 @@ static bool ggml_backend_xdna_run_i16_f32_matmul(
     }
 }
 
+static bool ggml_backend_xdna_init_batched_shape(
+        ggml_backend_xdna_backend_context * ctx,
+        ggml_backend_xdna_batched_state & state, size_t rows,
+        const char * path, const char * expected_xclbin,
+        const char * expected_instructions) {
+    if (ctx == nullptr || ctx->device_context == nullptr ||
+        ctx->device_context->xrt_device == nullptr || path == nullptr || path[0] == '\0') return false;
+    try {
+        unsigned char digest[GGML_XDNA_SHA256_DIGEST_SIZE];
+        if (!ggml_backend_xdna_hash_file_sha256(path, digest)) return false;
+        char actual[GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
+        ggml_backend_xdna_format_sha256(digest, actual);
+        if (std::string(actual) != expected_xclbin) {
+            std::fprintf(stderr, "ggml_xdna: M=%zu batched XCLBIN fingerprint mismatch: %s\n", rows, actual);
+            return false;
+        }
+        const std::filesystem::path artifact_path(path);
+        const std::string inst_path = (artifact_path.parent_path() / "insts.bin").string();
+        std::ifstream file(inst_path, std::ios::binary | std::ios::ate);
+        const std::streamsize size = file ? file.tellg() : 0;
+        if (size <= 0 || size % static_cast<std::streamsize>(sizeof(uint32_t)) != 0) return false;
+        state.instructions.resize(static_cast<size_t>(size) / sizeof(uint32_t));
+        file.seekg(0, std::ios::beg);
+        if (!file.read(reinterpret_cast<char *>(state.instructions.data()), size)) return false;
+        ggml_xdna_sha256_hash(digest, reinterpret_cast<const unsigned char *>(state.instructions.data()), static_cast<size_t>(size));
+        ggml_backend_xdna_format_sha256(digest, actual);
+        if (std::string(actual) != expected_instructions) {
+            std::fprintf(stderr, "ggml_xdna: M=%zu batched instruction fingerprint mismatch: %s\n", rows, actual);
+            state.instructions.clear(); return false;
+        }
+        state.rows = rows; state.xclbin_path = path;
+        state.xclbin = std::make_unique<xrt::xclbin>(state.xclbin_path);
+        auto kernels = state.xclbin->get_kernels();
+        auto it = std::find_if(kernels.begin(), kernels.end(), [](xrt::xclbin::kernel k) { return k.get_name().rfind("MLIR_AIE", 0) == 0; });
+        if (it == kernels.end()) return false;
+        ctx->device_context->xrt_device->register_xclbin(*state.xclbin);
+        state.hw_context = std::make_unique<xrt::hw_context>(*ctx->device_context->xrt_device, state.xclbin->get_uuid());
+        state.kernel = std::make_unique<xrt::kernel>(*state.hw_context, it->get_name());
+        state.available = true;
+        std::fprintf(stderr, "ggml_xdna: M=%zu batched fast path ready\n", rows);
+        return true;
+    } catch (const std::exception & e) {
+        std::fprintf(stderr, "ggml_xdna: M=%zu batched init failed: %s\n", rows, e.what());
+        state.available = false; return false;
+    } catch (...) { state.available = false; return false; }
+}
+
+static ggml_backend_xdna_q4_shape ggml_backend_xdna_q4_shape_from_rows(size_t rows) {
+    switch (rows) {
+        case 9216: return ggml_backend_xdna_q4_shape::m9216;
+        case 4096: return ggml_backend_xdna_q4_shape::m4096;
+        case 8192: return ggml_backend_xdna_q4_shape::m8192;
+        default:   return ggml_backend_xdna_q4_shape::m1024;
+    }
+}
+
+// Applies the persistent Q4_K -> 152-byte transport cache (experimental,
+// GGML_XDNA_Q4K_TRANSPORT_CACHE) or, if disabled/uninitialized, performs the
+// exact existing native -> transport conversion directly. Either way,
+// `dst_transport` (the mapped Q4 execution BO buffer) ends up holding valid
+// transport bytes for `rows` rows; nothing about Q4 BO sync/XRT/output
+// changes. `q4_native_rows` is used as the cache key: it is the ggml
+// tensor's data pointer, stable for the lifetime of an immutable weight
+// tensor within one model/context.
+static bool ggml_backend_xdna_q4_cache_apply(
+        ggml_backend_xdna_backend_context * ctx,
+        ggml_backend_xdna_q4_shape shape,
+        const void * q4_native_rows,
+        size_t rows,
+        void * dst_transport) {
+    constexpr size_t block_count = 10;
+    constexpr size_t q4_transport_block_bytes = 152;
+    constexpr size_t q4_native_row_bytes = block_count * sizeof(block_q4_K);
+    constexpr size_t q4_transport_row_bytes = block_count * q4_transport_block_bytes;
+
+    if (ctx == nullptr || q4_native_rows == nullptr || dst_transport == nullptr || rows == 0) {
+        return false;
+    }
+
+    const size_t native_bytes    = rows * q4_native_row_bytes;
+    const size_t transport_bytes = rows * q4_transport_row_bytes;
+
+    auto & cache = ctx->q4_cache;
+    if (!cache.env_checked) {
+        cache.enabled = ggml_backend_xdna_env_flag_enabled("GGML_XDNA_Q4K_TRANSPORT_CACHE");
+        cache.env_checked = true;
+        std::fprintf(stderr, "ggml_xdna: Q4 transport cache %s\n", cache.enabled ? "ENABLED" : "disabled");
+    }
+
+    auto convert_into = [&](uint8_t * dst) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto * native = static_cast<const uint8_t *>(q4_native_rows);
+        for (size_t row = 0; row < rows; ++row) {
+            const uint8_t * native_row    = native + row * q4_native_row_bytes;
+            uint8_t       * transport_row = dst    + row * q4_transport_row_bytes;
+            for (size_t block = 0; block < block_count; ++block) {
+                block_q4_K b;
+                std::memcpy(&b, native_row + block * sizeof(b), sizeof(b));
+                uint8_t * out = transport_row + block * q4_transport_block_bytes;
+                std::memcpy(out, &b, sizeof(b));
+                const float d    = ggml_fp16_to_fp32(b.d);
+                const float dmin = ggml_fp16_to_fp32(b.dmin);
+                std::memcpy(out + sizeof(b), &d, sizeof(d));
+                std::memcpy(out + sizeof(b) + sizeof(d), &dmin, sizeof(dmin));
+            }
+        }
+        const auto t1 = std::chrono::steady_clock::now();
+        ctx->timers.q4_conversion_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+        cache.blocks_converted          += rows * block_count;
+        cache.native_bytes_converted    += native_bytes;
+        cache.transport_bytes_generated += transport_bytes;
+    };
+
+    if (!cache.enabled) {
+        convert_into(static_cast<uint8_t *>(dst_transport));
+        return true;
+    }
+
+    auto it = cache.entries.find(q4_native_rows);
+    const bool valid_hit =
+        it != cache.entries.end() &&
+        it->second.m               == rows &&
+        it->second.native_bytes    == native_bytes &&
+        it->second.transport_bytes == transport_bytes &&
+        it->second.transport.size() == transport_bytes;
+
+    ggml_backend_xdna_q4_cache_entry * entry = nullptr;
+
+    if (valid_hit) {
+        ++cache.hits;
+        switch (shape) {
+            case ggml_backend_xdna_q4_shape::m9216: ++cache.hits_m9216; break;
+            case ggml_backend_xdna_q4_shape::m4096: ++cache.hits_m4096; break;
+            case ggml_backend_xdna_q4_shape::m8192: ++cache.hits_m8192; break;
+            case ggml_backend_xdna_q4_shape::m1024: ++cache.hits_m1024; break;
+        }
+        entry = &it->second;
+    } else {
+        // Miss, or a stale entry whose metadata no longer matches (e.g. a
+        // recycled pointer): rebuild safely rather than trust stale bytes.
+        ++cache.misses;
+        ggml_backend_xdna_q4_cache_entry fresh;
+        fresh.m               = rows;
+        fresh.native_bytes    = native_bytes;
+        fresh.transport_bytes = transport_bytes;
+        fresh.transport.assign(transport_bytes, 0);
+        convert_into(fresh.transport.data());
+        entry = &(cache.entries[q4_native_rows] = std::move(fresh));
+    }
+
+    const auto t0 = std::chrono::steady_clock::now();
+    std::memcpy(dst_transport, entry->transport.data(), transport_bytes);
+    const auto t1 = std::chrono::steady_clock::now();
+    ctx->timers.q4_cached_memcpy_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+    cache.transport_bytes_copied    += transport_bytes;
+
+    return true;
+}
+
+static bool ggml_backend_xdna_run_batched_shape(
+        ggml_backend_xdna_backend_context * ctx, ggml_backend_xdna_batched_state & state,
+        const void * q4_rows, size_t q4_rows_bytes, const float * activations,
+        size_t activation_elements, float * result, size_t result_bytes) {
+    constexpr size_t block_count = 10, q4_transport_block_bytes = 152;
+    constexpr size_t q4_native_row_bytes = block_count * sizeof(block_q4_K);
+    constexpr size_t q4_transport_row_bytes = block_count * q4_transport_block_bytes;
+    constexpr size_t q8_row_bytes = block_count * sizeof(block_q8_K);
+    if (!state.available || state.kernel == nullptr || q4_rows == nullptr || activations == nullptr || result == nullptr ||
+        q4_rows_bytes != state.rows * q4_native_row_bytes || activation_elements != 2560 || result_bytes != state.rows * sizeof(float)) return false;
+    try {
+        auto & device = *ctx->device_context->xrt_device;
+        auto & kernel = *state.kernel;
+        const uint32_t instruction_count = static_cast<uint32_t>(state.instructions.size());
+        if (!state.bos_initialized) {
+            state.bo_instr = std::make_unique<xrt::bo>(device, instruction_count * sizeof(uint32_t), XCL_BO_FLAGS_CACHEABLE, kernel.group_id(1));
+            state.bo_q4 = std::make_unique<xrt::bo>(device, state.rows * q4_transport_row_bytes, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(3));
+            state.bo_q8 = std::make_unique<xrt::bo>(device, q8_row_bytes, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(4));
+            state.bo_out = std::make_unique<xrt::bo>(device, state.rows * sizeof(float), XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(5));
+            state.buf_instr = state.bo_instr->map<void *>(); state.buf_q4 = state.bo_q4->map<void *>();
+            state.buf_q8 = state.bo_q8->map<void *>(); state.buf_out = state.bo_out->map<float *>();
+            std::memcpy(state.buf_instr, state.instructions.data(), instruction_count * sizeof(uint32_t));
+            state.bo_instr->sync(XCL_BO_SYNC_BO_TO_DEVICE); state.instruction_count = instruction_count; state.bos_initialized = true;
+        }
+        else if (state.instruction_count != instruction_count || std::memcmp(state.buf_instr, state.instructions.data(), instruction_count * sizeof(uint32_t)) != 0) return false;
+        if (!ggml_backend_xdna_q4_cache_apply(ctx, ggml_backend_xdna_q4_shape_from_rows(state.rows), q4_rows, state.rows, state.buf_q4)) {
+            return false;
+        }
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            std::vector<block_q8_K> q8(block_count); std::memset(q8.data(), 0, q8_row_bytes);
+            quantize_row_q8_K_ref(activations, q8.data(), 2560); std::memcpy(state.buf_q8, q8.data(), q8_row_bytes);
+            const auto t1 = std::chrono::steady_clock::now();
+            ctx->timers.q8_quant_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+        }
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            state.bo_q4->sync(XCL_BO_SYNC_BO_TO_DEVICE); ++ctx->q4_to_device;
+            const auto t1 = std::chrono::steady_clock::now();
+            ctx->timers.q4_sync_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+        }
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            state.bo_q8->sync(XCL_BO_SYNC_BO_TO_DEVICE); ++ctx->q8_to_device;
+            const auto t1 = std::chrono::steady_clock::now();
+            ctx->timers.q8_sync_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+        }
+        {
+            const size_t shape_index = static_cast<size_t>(ggml_backend_xdna_q4_shape_from_rows(state.rows));
+            auto & timing = ctx->shape_timing[shape_index];
+            const auto submit_begin = std::chrono::steady_clock::now();
+            auto run = (*state.kernel)(3u, *state.bo_instr, instruction_count, *state.bo_q4, *state.bo_q8, *state.bo_out);
+            const auto submit_end = std::chrono::steady_clock::now();
+            timing.submit_ms += std::chrono::duration<double, std::milli>(submit_end - submit_begin).count();
+            const auto wait_begin = std::chrono::steady_clock::now();
+            ++ctx->xrt_runs; run.wait(); ++ctx->run_waits;
+            const auto wait_end = std::chrono::steady_clock::now();
+            timing.wait_ms += std::chrono::duration<double, std::milli>(wait_end - wait_begin).count();
+            ++timing.ops;
+            ctx->timers.xrt_submit_wait_ms += std::chrono::duration<double, std::milli>(wait_end - submit_begin).count();
+        }
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            state.bo_out->sync(XCL_BO_SYNC_BO_FROM_DEVICE); ++ctx->output_from_device;
+            std::memcpy(result, state.buf_out, result_bytes);
+            const auto t1 = std::chrono::steady_clock::now();
+            ctx->timers.output_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+        }
+        return true;
+    } catch (...) { return false; }
+}
 static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
         ggml_backend_t backend,
         const void * q4_rows,
@@ -1514,108 +1910,68 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
         xrt::bo & bo_out =
             *ctx->q4_m9216_bo_out;
 
-        auto * q4_transport =
-            static_cast<uint8_t *>(
-                ctx->q4_m9216_buf_q4);
-
-        const auto * q4_native =
-            static_cast<const uint8_t *>(
-                q4_rows);
-
-        for (size_t row = 0; row < rows; ++row) {
-            const uint8_t * native_row =
-                q4_native +
-                row * q4_native_row_bytes;
-
-            uint8_t * transport_row =
-                q4_transport +
-                row * q4_transport_row_bytes;
-
-            for (size_t block = 0;
-                 block < block_count;
-                 ++block) {
-                block_q4_K native_block;
-
-                std::memcpy(
-                    &native_block,
-                    native_row +
-                        block * sizeof(block_q4_K),
-                    sizeof(native_block));
-
-                uint8_t * dst =
-                    transport_row +
-                    block * q4_transport_block_bytes;
-
-                std::memcpy(
-                    dst,
-                    &native_block,
-                    sizeof(native_block));
-
-                const float d =
-                    ggml_fp16_to_fp32(
-                        native_block.d);
-
-                const float dmin =
-                    ggml_fp16_to_fp32(
-                        native_block.dmin);
-
-                std::memcpy(
-                    dst + sizeof(block_q4_K),
-                    &d,
-                    sizeof(d));
-
-                std::memcpy(
-                    dst +
-                        sizeof(block_q4_K) +
-                        sizeof(d),
-                    &dmin,
-                    sizeof(dmin));
-            }
+        if (!ggml_backend_xdna_q4_cache_apply(
+                ctx, ggml_backend_xdna_q4_shape::m9216,
+                q4_rows, rows, ctx->q4_m9216_buf_q4)) {
+            return false;
         }
 
-        std::vector<block_q8_K> q8_blocks(
-            block_count);
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            std::vector<block_q8_K> q8_blocks(block_count);
+            std::memset(q8_blocks.data(), 0, q8_row_bytes);
+            quantize_row_q8_K_ref(activations, q8_blocks.data(), elements);
+            std::memcpy(ctx->q4_m9216_buf_q8, q8_blocks.data(), q8_row_bytes);
+            const auto t1 = std::chrono::steady_clock::now();
+            ctx->timers.q8_quant_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+        }
 
-        std::memset(
-            q8_blocks.data(),
-            0,
-            q8_row_bytes);
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            bo_q4.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+            ++ctx->q4_to_device;
+            const auto t1 = std::chrono::steady_clock::now();
+            ctx->timers.q4_sync_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+        }
 
-        quantize_row_q8_K_ref(
-            activations,
-            q8_blocks.data(),
-            elements);
-
-        std::memcpy(
-            ctx->q4_m9216_buf_q8,
-            q8_blocks.data(),
-            q8_row_bytes);
-
-        bo_q4.sync(
-            XCL_BO_SYNC_BO_TO_DEVICE);
-
-        bo_q8.sync(
-            XCL_BO_SYNC_BO_TO_DEVICE);
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            bo_q8.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+            ++ctx->q8_to_device;
+            const auto t1 = std::chrono::steady_clock::now();
+            ctx->timers.q8_sync_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+        }
 
         constexpr unsigned int opcode = 3;
+        {
+            auto & timing = ctx->shape_timing[static_cast<size_t>(ggml_backend_xdna_q4_shape::m9216)];
+            const auto submit_begin = std::chrono::steady_clock::now();
+            auto run = kernel(
+                opcode,
+                *ctx->q4_m9216_bo_instr,
+                instruction_count,
+                bo_q4,
+                bo_q8,
+                bo_out);
+            const auto submit_end = std::chrono::steady_clock::now();
+            timing.submit_ms += std::chrono::duration<double, std::milli>(submit_end - submit_begin).count();
+            const auto wait_begin = std::chrono::steady_clock::now();
+            run.wait();
+            ++ctx->xrt_runs; ++ctx->run_waits;
+            const auto wait_end = std::chrono::steady_clock::now();
+            timing.wait_ms += std::chrono::duration<double, std::milli>(wait_end - wait_begin).count();
+            ++timing.ops;
+            ctx->timers.xrt_submit_wait_ms += std::chrono::duration<double, std::milli>(wait_end - submit_begin).count();
+        }
 
-        auto run = kernel(
-            opcode,
-            *ctx->q4_m9216_bo_instr,
-            instruction_count,
-            bo_q4,
-            bo_q8,
-            bo_out);
-
-        run.wait();
-
-        bo_out.sync(
-            XCL_BO_SYNC_BO_FROM_DEVICE);
-
-        std::memcpy(
-            result,
-            ctx->q4_m9216_buf_out,
-            output_bytes);
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            bo_out.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
+            ++ctx->output_from_device;
+            std::memcpy(result, ctx->q4_m9216_buf_out, output_bytes);
+            const auto t1 = std::chrono::steady_clock::now();
+            ctx->timers.output_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+        }
 
         return true;
     }
@@ -1946,19 +2302,19 @@ ggml_backend_xdna_init_q4k_q8k_k2560_m9216(
     static constexpr unsigned char
         expected_xclbin_sha256[
             GGML_XDNA_SHA256_DIGEST_SIZE] = {
-        0x33, 0xce, 0x70, 0xf5, 0x2f, 0xca, 0x40, 0x4e,
-        0x30, 0xf3, 0x5f, 0xa9, 0xb3, 0xb1, 0x32, 0x1e,
-        0xff, 0x19, 0x2c, 0x64, 0x1b, 0x0a, 0x31, 0x67,
-        0x5a, 0x5e, 0xe3, 0x47, 0x93, 0xda, 0xf0, 0x0f,
+        0x33, 0x9c, 0x39, 0xe5, 0x43, 0xd0, 0x02, 0x45,
+        0x7a, 0x43, 0x9f, 0xee, 0x8e, 0x80, 0x9a, 0xbf,
+        0xdb, 0x8f, 0xa0, 0x05, 0xe2, 0x02, 0x25, 0x3d,
+        0xfc, 0xca, 0x22, 0x89, 0x0e, 0xe9, 0x98, 0x28,
     };
 
     static constexpr unsigned char
         expected_instructions_sha256[
             GGML_XDNA_SHA256_DIGEST_SIZE] = {
-        0xa0, 0x5c, 0xe5, 0x8a, 0x7b, 0x03, 0xc2, 0x70,
-        0x23, 0x7a, 0x93, 0xf0, 0x3a, 0x19, 0x58, 0xf6,
-        0x52, 0x0f, 0x99, 0x0c, 0x73, 0x6d, 0xb4, 0x7f,
-        0xfd, 0xd0, 0x80, 0x3a, 0x97, 0x4a, 0x12, 0x9c,
+        0xbc, 0x8c, 0x03, 0x1c, 0x85, 0x42, 0x17, 0xa6,
+        0xaf, 0x5d, 0xce, 0xce, 0x5c, 0x5b, 0xfc, 0x5b,
+        0xcf, 0xda, 0xfe, 0xb0, 0xfe, 0xba, 0x44, 0xa5,
+        0x00, 0x79, 0xb4, 0xba, 0x81, 0x9b, 0x81, 0x4b,
     };
 
     ctx->q4_m9216_xclbin_path =
@@ -2242,56 +2598,73 @@ static ggml_backend_t ggml_backend_xdna_device_init(
 
     if (requested_profile ==
         ggml_backend_xdna_kernel_profile::q4k_q8k_k2560) {
-        const char * m9216_env =
-            std::getenv(
-                "GGML_XDNA_Q4K_M9216_XCLBIN");
-
-        std::string m9216_xclbin_path;
-
-        if (m9216_env != nullptr &&
-            m9216_env[0] != '\0') {
-            m9216_xclbin_path =
-                m9216_env;
-
-            std::fprintf(
-                stderr,
-                "ggml_xdna: using explicit M=9216 XCLBIN override: %s\n",
-                m9216_xclbin_path.c_str());
-        }
-        else {
-            const std::filesystem::path primary_xclbin_path(
-                backend_ctx->xclbin_path);
-
-            const std::filesystem::path default_m9216_xclbin_path =
-                primary_xclbin_path.parent_path().parent_path() /
-                "q4k_q8k_k2560_m9216" /
-                "final.xclbin";
-
-            if (std::filesystem::exists(
-                    default_m9216_xclbin_path)) {
-                m9216_xclbin_path =
-                    default_m9216_xclbin_path.string();
-
-                std::fprintf(
-                    stderr,
-                    "ggml_xdna: auto-discovered M=9216 XCLBIN: %s\n",
-                    m9216_xclbin_path.c_str());
+        const std::filesystem::path primary_xclbin_path(
+            backend_ctx->xclbin_path);
+        const std::filesystem::path kernel_root =
+            primary_xclbin_path.parent_path().parent_path();
+        auto resolve_shape_path = [&](const char * env_name, size_t rows) {
+            const char * env = std::getenv(env_name);
+            if (env != nullptr && env[0] != '\0') {
+                std::fprintf(stderr,
+                    "ggml_xdna: using explicit M=%zu XCLBIN override: %s\n",
+                    rows, env);
+                return std::string(env);
             }
+            const auto path = kernel_root /
+                (std::string("q4k_q8k_k2560_m") + std::to_string(rows)) /
+                "final.xclbin";
+            if (std::filesystem::exists(path)) {
+                std::fprintf(stderr,
+                    "ggml_xdna: auto-discovered M=%zu XCLBIN: %s\n",
+                    rows, path.string().c_str());
+                return path.string();
+            }
+            return std::string();
+        };
+
+        std::string m9216_xclbin_path =
+            resolve_shape_path("GGML_XDNA_Q4K_M9216_XCLBIN", 9216);
+        if (!m9216_xclbin_path.empty() &&
+            !ggml_backend_xdna_init_q4k_q8k_k2560_m9216(
+                backend_ctx, m9216_xclbin_path.c_str())) {
+            delete backend_ctx;
+            return nullptr;
+        }
+        if (m9216_xclbin_path.empty()) {
+            std::fprintf(stderr,
+                "ggml_xdna: M=9216 artifact not found; per-row fallback remains active\n");
         }
 
-        if (!m9216_xclbin_path.empty()) {
-            if (!ggml_backend_xdna_init_q4k_q8k_k2560_m9216(
-                    backend_ctx,
-                    m9216_xclbin_path.c_str())) {
+        const struct {
+            const char * env_name;
+            size_t rows;
+            ggml_backend_xdna_batched_state ggml_backend_xdna_backend_context::* state;
+            const char * xclbin_sha;
+            const char * instructions_sha;
+        } shapes[] = {
+            {"GGML_XDNA_Q4K_M1024_XCLBIN", 1024, &ggml_backend_xdna_backend_context::q4_m1024,
+                "b4238e2ec9c302832f7d0b592b7c8c004779403473f6a2bfe4512e663de081c9",
+                "896b176c47abc9456b6744df36097982cc373f38306ec4cde39a51e1a3422b50"},
+            {"GGML_XDNA_Q4K_M4096_XCLBIN", 4096, &ggml_backend_xdna_backend_context::q4_m4096,
+                "07fc35af0d8203fb2d7cd748e88bcd99a4febbcb7eb09a6e2e8e389af38b82ff",
+                "965611200fb2bd4bfeb216726a464303ed9b88de4defffb6c4811c5f9b35a0be"},
+            {"GGML_XDNA_Q4K_M8192_XCLBIN", 8192, &ggml_backend_xdna_backend_context::q4_m8192,
+                "1d066a247221ec16817ac7fa2ad5f096c8bc0a78652d757f17c9353006bb314c",
+                "b6c2bedb58c105e616b203be561136b81d2789b90ec14307817dad6504490695"},
+        };
+        for (const auto & shape : shapes) {
+            const std::string path = resolve_shape_path(shape.env_name, shape.rows);
+            if (!path.empty() && !ggml_backend_xdna_init_batched_shape(
+                    backend_ctx, backend_ctx->*shape.state, shape.rows, path.c_str(),
+                    shape.xclbin_sha, shape.instructions_sha)) {
                 delete backend_ctx;
                 return nullptr;
             }
-        }
-        else {
-            std::fprintf(
-                stderr,
-                "ggml_xdna: M=9216 artifact not found beside primary "
-                "XCLBIN tree; per-row fallback remains active\n");
+            if (path.empty()) {
+                std::fprintf(stderr,
+                    "ggml_xdna: M=%zu artifact not found; per-row fallback remains active\n",
+                    shape.rows);
+            }
         }
     }
 
