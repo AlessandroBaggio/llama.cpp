@@ -87,6 +87,32 @@ struct ggml_backend_xdna_backend_context {
 
     uint32_t q4_instruction_count = 0;
     bool q4_bos_initialized = false;
+
+    // Optional full-shape Q4_K x Q8_K K=2560 M=9216 fast path.
+    // This is a secondary artifact belonging to the same
+    // q4k_q8k_k2560 backend profile. The existing per-row kernel
+    // remains the fallback for every other M.
+    std::string q4_m9216_xclbin_path;
+    std::string q4_m9216_instructions_path;
+    std::vector<uint32_t> q4_m9216_instructions;
+
+    std::unique_ptr<xrt::xclbin> q4_m9216_xclbin;
+    std::unique_ptr<xrt::hw_context> q4_m9216_hw_context;
+    std::unique_ptr<xrt::kernel> q4_m9216_kernel;
+
+    std::unique_ptr<xrt::bo> q4_m9216_bo_instr;
+    std::unique_ptr<xrt::bo> q4_m9216_bo_q4;
+    std::unique_ptr<xrt::bo> q4_m9216_bo_q8;
+    std::unique_ptr<xrt::bo> q4_m9216_bo_out;
+
+    void * q4_m9216_buf_instr = nullptr;
+    void * q4_m9216_buf_q4 = nullptr;
+    void * q4_m9216_buf_q8 = nullptr;
+    float * q4_m9216_buf_out = nullptr;
+
+    uint32_t q4_m9216_instruction_count = 0;
+    bool q4_m9216_bos_initialized = false;
+    bool q4_m9216_available = false;
 };
 
 static ggml_backend_xdna_context ggml_backend_xdna_create_context() {
@@ -788,7 +814,17 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560(
         size_t q4_row_bytes,
         const float * activations,
         size_t activation_elements,
+        bool refresh_activation,
         float * result);
+
+static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
+        ggml_backend_t backend,
+        const void * q4_rows,
+        size_t q4_rows_bytes,
+        const float * activations,
+        size_t activation_elements,
+        float * result,
+        size_t result_bytes);
 
 static bool ggml_backend_xdna_is_view_op(enum ggml_op op) {
     return
@@ -941,12 +977,32 @@ static enum ggml_status ggml_backend_xdna_graph_compute_single_node(
             "ggml_xdna: controlled Q4_K K=2560 MUL_MAT graph accepted for M=%lld\n",
             static_cast<long long>(m));
 
-        // Correctness-first multi-row path.
-        //
-        // The current primitive computes one K=2560 dot product.
-        // Execute one weight row at a time. This intentionally
-        // re-quantizes/re-uploads the shared activation for each row;
-        // activation reuse is a later performance optimization.
+        if (m == 9216 &&
+            ctx->q4_m9216_available) {
+            if (!ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
+                    backend,
+                    q4_rows,
+                    expected_q4_bytes,
+                    activations,
+                    static_cast<size_t>(k),
+                    result,
+                    expected_dst_bytes)) {
+                std::fprintf(
+                    stderr,
+                    "ggml_xdna: M=9216 multi-row Q4_K K=2560 execution failed\n");
+                return GGML_STATUS_FAILED;
+            }
+
+            std::fprintf(
+                stderr,
+                "ggml_xdna: controlled Q4_K K=2560 MUL_MAT executed via M=9216 multi-row fast path\n");
+
+            return GGML_STATUS_SUCCESS;
+        }
+
+        // Fallback primitive: one K=2560 dot product per launch.
+        // Quantize/upload the shared activation on the first row, then
+        // reuse the persistent Q8_K BO for all remaining rows.
         for (size_t row = 0; row < rows; ++row) {
             const void * q4_row =
                 q4_rows +
@@ -961,6 +1017,7 @@ static enum ggml_status ggml_backend_xdna_graph_compute_single_node(
                     q4_native_row_bytes,
                     activations,
                     static_cast<size_t>(k),
+                    row == 0,
                     &result[row])) {
                 std::fprintf(
                     stderr,
@@ -1285,6 +1342,297 @@ static bool ggml_backend_xdna_run_i16_f32_matmul(
     }
 }
 
+static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
+        ggml_backend_t backend,
+        const void * q4_rows,
+        size_t q4_rows_bytes,
+        const float * activations,
+        size_t activation_elements,
+        float * result,
+        size_t result_bytes) {
+    constexpr size_t rows = 9216;
+    constexpr int64_t elements = 2560;
+    constexpr size_t block_count = 10;
+    constexpr size_t q4_transport_block_bytes = 152;
+
+    static_assert(QK_K == 256, "unexpected QK_K");
+    static_assert(sizeof(block_q4_K) == 144, "unexpected Q4_K block size");
+    static_assert(sizeof(block_q8_K) == 292, "unexpected Q8_K block size");
+
+    constexpr size_t q4_native_row_bytes =
+        block_count * sizeof(block_q4_K);
+
+    constexpr size_t q4_transport_row_bytes =
+        block_count * q4_transport_block_bytes;
+
+    constexpr size_t q4_transport_bytes =
+        rows * q4_transport_row_bytes;
+
+    constexpr size_t q8_row_bytes =
+        block_count * sizeof(block_q8_K);
+
+    constexpr size_t output_bytes =
+        rows * sizeof(float);
+
+    if (backend == nullptr ||
+        q4_rows == nullptr ||
+        activations == nullptr ||
+        result == nullptr ||
+        q4_rows_bytes != rows * q4_native_row_bytes ||
+        activation_elements != static_cast<size_t>(elements) ||
+        result_bytes != output_bytes) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: invalid M=9216 multi-row Q4_K x Q8_K arguments\n");
+        return false;
+    }
+
+    auto * ctx =
+        static_cast<ggml_backend_xdna_backend_context *>(
+            backend->context);
+
+    if (ctx == nullptr ||
+        ctx->device_context == nullptr ||
+        ctx->device_context->xrt_device == nullptr ||
+        !ctx->q4_m9216_available ||
+        ctx->q4_m9216_kernel == nullptr ||
+        ctx->q4_m9216_instructions.empty()) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: M=9216 multi-row fast path is not initialized\n");
+        return false;
+    }
+
+    try {
+        xrt::device & device =
+            *ctx->device_context->xrt_device;
+
+        xrt::kernel & kernel =
+            *ctx->q4_m9216_kernel;
+
+        const uint32_t instruction_count =
+            static_cast<uint32_t>(
+                ctx->q4_m9216_instructions.size());
+
+        const size_t instruction_bytes =
+            static_cast<size_t>(instruction_count) *
+            sizeof(uint32_t);
+
+        if (!ctx->q4_m9216_bos_initialized) {
+            auto bo_instr = std::make_unique<xrt::bo>(
+                device,
+                instruction_bytes,
+                XCL_BO_FLAGS_CACHEABLE,
+                kernel.group_id(1));
+
+            auto bo_q4 = std::make_unique<xrt::bo>(
+                device,
+                q4_transport_bytes,
+                XRT_BO_FLAGS_HOST_ONLY,
+                kernel.group_id(3));
+
+            auto bo_q8 = std::make_unique<xrt::bo>(
+                device,
+                q8_row_bytes,
+                XRT_BO_FLAGS_HOST_ONLY,
+                kernel.group_id(4));
+
+            auto bo_out = std::make_unique<xrt::bo>(
+                device,
+                output_bytes,
+                XRT_BO_FLAGS_HOST_ONLY,
+                kernel.group_id(5));
+
+            void * buf_instr =
+                bo_instr->map<void *>();
+
+            void * buf_q4 =
+                bo_q4->map<void *>();
+
+            void * buf_q8 =
+                bo_q8->map<void *>();
+
+            float * buf_out =
+                bo_out->map<float *>();
+
+            std::memcpy(
+                buf_instr,
+                ctx->q4_m9216_instructions.data(),
+                instruction_bytes);
+
+            bo_instr->sync(
+                XCL_BO_SYNC_BO_TO_DEVICE);
+
+            ctx->q4_m9216_bo_instr =
+                std::move(bo_instr);
+
+            ctx->q4_m9216_bo_q4 =
+                std::move(bo_q4);
+
+            ctx->q4_m9216_bo_q8 =
+                std::move(bo_q8);
+
+            ctx->q4_m9216_bo_out =
+                std::move(bo_out);
+
+            ctx->q4_m9216_buf_instr =
+                buf_instr;
+
+            ctx->q4_m9216_buf_q4 =
+                buf_q4;
+
+            ctx->q4_m9216_buf_q8 =
+                buf_q8;
+
+            ctx->q4_m9216_buf_out =
+                buf_out;
+
+            ctx->q4_m9216_instruction_count =
+                instruction_count;
+
+            ctx->q4_m9216_bos_initialized =
+                true;
+        }
+        else if (
+            ctx->q4_m9216_instruction_count != instruction_count ||
+            std::memcmp(
+                ctx->q4_m9216_buf_instr,
+                ctx->q4_m9216_instructions.data(),
+                instruction_bytes) != 0) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: persistent M=9216 instruction BO mismatch\n");
+            return false;
+        }
+
+        xrt::bo & bo_q4 =
+            *ctx->q4_m9216_bo_q4;
+
+        xrt::bo & bo_q8 =
+            *ctx->q4_m9216_bo_q8;
+
+        xrt::bo & bo_out =
+            *ctx->q4_m9216_bo_out;
+
+        auto * q4_transport =
+            static_cast<uint8_t *>(
+                ctx->q4_m9216_buf_q4);
+
+        const auto * q4_native =
+            static_cast<const uint8_t *>(
+                q4_rows);
+
+        for (size_t row = 0; row < rows; ++row) {
+            const uint8_t * native_row =
+                q4_native +
+                row * q4_native_row_bytes;
+
+            uint8_t * transport_row =
+                q4_transport +
+                row * q4_transport_row_bytes;
+
+            for (size_t block = 0;
+                 block < block_count;
+                 ++block) {
+                block_q4_K native_block;
+
+                std::memcpy(
+                    &native_block,
+                    native_row +
+                        block * sizeof(block_q4_K),
+                    sizeof(native_block));
+
+                uint8_t * dst =
+                    transport_row +
+                    block * q4_transport_block_bytes;
+
+                std::memcpy(
+                    dst,
+                    &native_block,
+                    sizeof(native_block));
+
+                const float d =
+                    ggml_fp16_to_fp32(
+                        native_block.d);
+
+                const float dmin =
+                    ggml_fp16_to_fp32(
+                        native_block.dmin);
+
+                std::memcpy(
+                    dst + sizeof(block_q4_K),
+                    &d,
+                    sizeof(d));
+
+                std::memcpy(
+                    dst +
+                        sizeof(block_q4_K) +
+                        sizeof(d),
+                    &dmin,
+                    sizeof(dmin));
+            }
+        }
+
+        std::vector<block_q8_K> q8_blocks(
+            block_count);
+
+        std::memset(
+            q8_blocks.data(),
+            0,
+            q8_row_bytes);
+
+        quantize_row_q8_K_ref(
+            activations,
+            q8_blocks.data(),
+            elements);
+
+        std::memcpy(
+            ctx->q4_m9216_buf_q8,
+            q8_blocks.data(),
+            q8_row_bytes);
+
+        bo_q4.sync(
+            XCL_BO_SYNC_BO_TO_DEVICE);
+
+        bo_q8.sync(
+            XCL_BO_SYNC_BO_TO_DEVICE);
+
+        constexpr unsigned int opcode = 3;
+
+        auto run = kernel(
+            opcode,
+            *ctx->q4_m9216_bo_instr,
+            instruction_count,
+            bo_q4,
+            bo_q8,
+            bo_out);
+
+        run.wait();
+
+        bo_out.sync(
+            XCL_BO_SYNC_BO_FROM_DEVICE);
+
+        std::memcpy(
+            result,
+            ctx->q4_m9216_buf_out,
+            output_bytes);
+
+        return true;
+    }
+    catch (const std::exception & e) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: M=9216 multi-row execution failed: %s\n",
+            e.what());
+        return false;
+    }
+    catch (...) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: M=9216 multi-row execution failed: unknown error\n");
+        return false;
+    }
+}
 static bool ggml_backend_xdna_run_q4k_q8k_k2560(
         ggml_backend_t backend,
         const uint32_t * instructions,
@@ -1293,6 +1641,7 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560(
         size_t q4_row_bytes,
         const float * activations,
         size_t activation_elements,
+        bool refresh_activation,
         float * result) {
     constexpr int64_t elements = 2560;
     constexpr size_t block_count = 10;
@@ -1379,19 +1728,23 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560(
             sizeof(dmin));
     }
 
-    std::vector<block_q8_K> q8_blocks(block_count);
+    std::vector<block_q8_K> q8_blocks;
 
-    // quantize_row_q8_K_ref leaves bsums untouched for an
-    // all-zero block, so initialize the complete native row.
-    std::memset(
-        q8_blocks.data(),
-        0,
-        q8_row_bytes);
+    if (refresh_activation) {
+        q8_blocks.resize(block_count);
 
-    quantize_row_q8_K_ref(
-        activations,
-        q8_blocks.data(),
-        elements);
+        // quantize_row_q8_K_ref leaves bsums untouched for an
+        // all-zero block, so initialize the complete native row.
+        std::memset(
+            q8_blocks.data(),
+            0,
+            q8_row_bytes);
+
+        quantize_row_q8_K_ref(
+            activations,
+            q8_blocks.data(),
+            elements);
+    }
 
     try {
         xrt::device & device =
@@ -1505,18 +1858,16 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560(
         bo_q4.sync(
             XCL_BO_SYNC_BO_TO_DEVICE);
 
-        std::memcpy(
-            buf_q8,
-            q8_blocks.data(),
-            q8_row_bytes);
+        if (refresh_activation) {
+            std::memcpy(
+                buf_q8,
+                q8_blocks.data(),
+                q8_row_bytes);
 
-        bo_q8.sync(
-            XCL_BO_SYNC_BO_TO_DEVICE);
+            bo_q8.sync(
+                XCL_BO_SYNC_BO_TO_DEVICE);
+        }
 
-        *buf_out = 0.0f;
-
-        bo_out.sync(
-            XCL_BO_SYNC_BO_TO_DEVICE);
 
         constexpr unsigned int opcode = 3;
 
@@ -1582,6 +1933,232 @@ static ggml_guid_t ggml_backend_xdna_guid(void) {
     return &guid;
 }
 
+static bool
+ggml_backend_xdna_init_q4k_q8k_k2560_m9216(
+        ggml_backend_xdna_backend_context * ctx,
+        const char * xclbin_path) {
+    if (ctx == nullptr ||
+        xclbin_path == nullptr ||
+        xclbin_path[0] == '\0') {
+        return false;
+    }
+
+    static constexpr unsigned char
+        expected_xclbin_sha256[
+            GGML_XDNA_SHA256_DIGEST_SIZE] = {
+        0x33, 0xce, 0x70, 0xf5, 0x2f, 0xca, 0x40, 0x4e,
+        0x30, 0xf3, 0x5f, 0xa9, 0xb3, 0xb1, 0x32, 0x1e,
+        0xff, 0x19, 0x2c, 0x64, 0x1b, 0x0a, 0x31, 0x67,
+        0x5a, 0x5e, 0xe3, 0x47, 0x93, 0xda, 0xf0, 0x0f,
+    };
+
+    static constexpr unsigned char
+        expected_instructions_sha256[
+            GGML_XDNA_SHA256_DIGEST_SIZE] = {
+        0xa0, 0x5c, 0xe5, 0x8a, 0x7b, 0x03, 0xc2, 0x70,
+        0x23, 0x7a, 0x93, 0xf0, 0x3a, 0x19, 0x58, 0xf6,
+        0x52, 0x0f, 0x99, 0x0c, 0x73, 0x6d, 0xb4, 0x7f,
+        0xfd, 0xd0, 0x80, 0x3a, 0x97, 0x4a, 0x12, 0x9c,
+    };
+
+    ctx->q4_m9216_xclbin_path =
+        xclbin_path;
+
+    const std::filesystem::path artifact_path(
+        ctx->q4_m9216_xclbin_path);
+
+    ctx->q4_m9216_instructions_path =
+        (
+            artifact_path.parent_path() /
+            "insts.bin"
+        ).string();
+
+    unsigned char actual_xclbin[
+        GGML_XDNA_SHA256_DIGEST_SIZE];
+
+    if (!ggml_backend_xdna_hash_file_sha256(
+            ctx->q4_m9216_xclbin_path,
+            actual_xclbin)) {
+        return false;
+    }
+
+    if (std::memcmp(
+            actual_xclbin,
+            expected_xclbin_sha256,
+            GGML_XDNA_SHA256_DIGEST_SIZE) != 0) {
+        char actual_hex[
+            GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
+
+        ggml_backend_xdna_format_sha256(
+            actual_xclbin,
+            actual_hex);
+
+        std::fprintf(
+            stderr,
+            "ggml_xdna: M=9216 XCLBIN fingerprint mismatch\n"
+            "ggml_xdna: actual SHA256: %s\n"
+            "ggml_xdna: XCLBIN file: %s\n",
+            actual_hex,
+            ctx->q4_m9216_xclbin_path.c_str());
+
+        return false;
+    }
+
+    try {
+        std::ifstream file(
+            ctx->q4_m9216_instructions_path,
+            std::ios::binary |
+                std::ios::ate);
+
+        if (!file) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: failed to open M=9216 instructions: %s\n",
+                ctx->q4_m9216_instructions_path.c_str());
+            return false;
+        }
+
+        const std::streamsize size =
+            file.tellg();
+
+        if (size <= 0 ||
+            size % static_cast<std::streamsize>(
+                sizeof(uint32_t)) != 0) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: invalid M=9216 instruction file size\n");
+            return false;
+        }
+
+        ctx->q4_m9216_instructions.resize(
+            static_cast<size_t>(size) /
+            sizeof(uint32_t));
+
+        file.seekg(
+            0,
+            std::ios::beg);
+
+        if (!file.read(
+                reinterpret_cast<char *>(
+                    ctx->q4_m9216_instructions.data()),
+                size)) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: failed to read M=9216 instructions\n");
+
+            ctx->q4_m9216_instructions.clear();
+            return false;
+        }
+
+        unsigned char actual_instructions[
+            GGML_XDNA_SHA256_DIGEST_SIZE];
+
+        ggml_xdna_sha256_hash(
+            actual_instructions,
+            reinterpret_cast<const unsigned char *>(
+                ctx->q4_m9216_instructions.data()),
+            ctx->q4_m9216_instructions.size() *
+                sizeof(uint32_t));
+
+        if (std::memcmp(
+                actual_instructions,
+                expected_instructions_sha256,
+                GGML_XDNA_SHA256_DIGEST_SIZE) != 0) {
+            char actual_hex[
+                GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
+
+            ggml_backend_xdna_format_sha256(
+                actual_instructions,
+                actual_hex);
+
+            std::fprintf(
+                stderr,
+                "ggml_xdna: M=9216 instruction fingerprint mismatch\n"
+                "ggml_xdna: actual SHA256: %s\n"
+                "ggml_xdna: instruction file: %s\n",
+                actual_hex,
+                ctx->q4_m9216_instructions_path.c_str());
+
+            ctx->q4_m9216_instructions.clear();
+            return false;
+        }
+
+        ctx->q4_m9216_xclbin =
+            std::make_unique<xrt::xclbin>(
+                ctx->q4_m9216_xclbin_path);
+
+        auto kernels =
+            ctx->q4_m9216_xclbin->get_kernels();
+
+        auto it =
+            std::find_if(
+                kernels.begin(),
+                kernels.end(),
+                [](xrt::xclbin::kernel kernel) {
+                    return kernel.get_name().rfind(
+                        "MLIR_AIE",
+                        0) == 0;
+                });
+
+        if (it == kernels.end()) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: MLIR_AIE kernel not found in M=9216 XCLBIN\n");
+            return false;
+        }
+
+        const std::string resolved_name =
+            it->get_name();
+
+        ctx->device_context->xrt_device->
+            register_xclbin(
+                *ctx->q4_m9216_xclbin);
+
+        ctx->q4_m9216_hw_context =
+            std::make_unique<xrt::hw_context>(
+                *ctx->device_context->xrt_device,
+                ctx->q4_m9216_xclbin->get_uuid());
+
+        ctx->q4_m9216_kernel =
+            std::make_unique<xrt::kernel>(
+                *ctx->q4_m9216_hw_context,
+                resolved_name);
+
+        ctx->q4_m9216_available =
+            true;
+
+        std::fprintf(
+            stderr,
+            "ggml_xdna: M=9216 multi-row fast path ready: "
+            "%zu instruction words, kernel %s\n",
+            ctx->q4_m9216_instructions.size(),
+            resolved_name.c_str());
+
+        return true;
+    }
+    catch (const std::exception & e) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: failed to initialize M=9216 fast path: %s\n",
+            e.what());
+
+        ctx->q4_m9216_available =
+            false;
+
+        return false;
+    }
+    catch (...) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: failed to initialize M=9216 fast path: "
+            "unknown error\n");
+
+        ctx->q4_m9216_available =
+            false;
+
+        return false;
+    }
+}
 static ggml_backend_t ggml_backend_xdna_device_init(
         ggml_backend_dev_t dev,
         const char * params) {
@@ -1661,6 +2238,61 @@ static ggml_backend_t ggml_backend_xdna_device_init(
             kernel_params)) {
         delete backend_ctx;
         return nullptr;
+    }
+
+    if (requested_profile ==
+        ggml_backend_xdna_kernel_profile::q4k_q8k_k2560) {
+        const char * m9216_env =
+            std::getenv(
+                "GGML_XDNA_Q4K_M9216_XCLBIN");
+
+        std::string m9216_xclbin_path;
+
+        if (m9216_env != nullptr &&
+            m9216_env[0] != '\0') {
+            m9216_xclbin_path =
+                m9216_env;
+
+            std::fprintf(
+                stderr,
+                "ggml_xdna: using explicit M=9216 XCLBIN override: %s\n",
+                m9216_xclbin_path.c_str());
+        }
+        else {
+            const std::filesystem::path primary_xclbin_path(
+                backend_ctx->xclbin_path);
+
+            const std::filesystem::path default_m9216_xclbin_path =
+                primary_xclbin_path.parent_path().parent_path() /
+                "q4k_q8k_k2560_m9216" /
+                "final.xclbin";
+
+            if (std::filesystem::exists(
+                    default_m9216_xclbin_path)) {
+                m9216_xclbin_path =
+                    default_m9216_xclbin_path.string();
+
+                std::fprintf(
+                    stderr,
+                    "ggml_xdna: auto-discovered M=9216 XCLBIN: %s\n",
+                    m9216_xclbin_path.c_str());
+            }
+        }
+
+        if (!m9216_xclbin_path.empty()) {
+            if (!ggml_backend_xdna_init_q4k_q8k_k2560_m9216(
+                    backend_ctx,
+                    m9216_xclbin_path.c_str())) {
+                delete backend_ctx;
+                return nullptr;
+            }
+        }
+        else {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: M=9216 artifact not found beside primary "
+                "XCLBIN tree; per-row fallback remains active\n");
+        }
     }
 
     if (device_ctx->active_backend_count == 0) {
