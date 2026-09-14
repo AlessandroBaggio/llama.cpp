@@ -23,11 +23,17 @@
 #include <vector>
 #include <chrono>
 #include <unordered_map>
+#include <atomic>
+#include <mutex>
 
 enum class ggml_backend_xdna_kernel_profile {
     none,
     i16_256,
     q4k_q8k_k2560,
+    // LLAMA-XDNA-W2IN-PROFILE-A1: dedicated slot for the proven real npu1/AIE2
+    // W2IN block kernel. It carries a different, smaller ABI than K=2560 and
+    // advertises no scheduler ops; it is driven only by the explicit block probe.
+    q4k_q8k_w2in_256,
 };
 
 static const char * ggml_backend_xdna_kernel_profile_name(
@@ -39,6 +45,9 @@ static const char * ggml_backend_xdna_kernel_profile_name(
             return "i16_256";
         case ggml_backend_xdna_kernel_profile::q4k_q8k_k2560:
             return "q4k_q8k_k2560";
+
+        case ggml_backend_xdna_kernel_profile::q4k_q8k_w2in_256:
+            return "q4k_q8k_w2in_256";
     }
 
     return "unknown";
@@ -325,6 +334,18 @@ static void ggml_backend_xdna_device_get_props(
     props->caps         = {};
 }
 
+// LLAMA-XDNA-NPU1-INTEGRATION-A1 forward declarations for the env-gated
+// controlled W2IN block invocation (the definition follows the SHA-256
+// helpers, so the compile order stays unchanged for everything else).
+static void ggml_backend_xdna_format_sha256(
+        const unsigned char digest[
+            GGML_XDNA_SHA256_DIGEST_SIZE],
+        char output[
+            GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1]);
+
+static void ggml_backend_xdna_w2in_block_probe(
+        ggml_backend_xdna_backend_context * ctx);
+
 static bool ggml_backend_xdna_parse_init_params(
         const char * params,
         ggml_backend_xdna_kernel_profile * profile,
@@ -378,6 +399,30 @@ static bool ggml_backend_xdna_parse_init_params(
             std::fprintf(
                 stderr,
                 "ggml_xdna: q4k_q8k_k2560 profile requires an XCLBIN path\n");
+            return false;
+        }
+
+        return true;
+    }
+
+    // Dedicated W2IN block profile (LLAMA-XDNA-W2IN-PROFILE-A1).
+    // Bound to the proven npu1/AIE2 package by the fingerprint tables above;
+    // the XCLBIN path is always explicit so the profile can never silently
+    // fall back to another package.
+    static constexpr char w2in_prefix[] =
+        "profile=q4k_q8k_w2in_256;";
+
+    if (value.rfind(w2in_prefix, 0) == 0) {
+        *profile =
+            ggml_backend_xdna_kernel_profile::q4k_q8k_w2in_256;
+
+        *xclbin_path =
+            value.substr(sizeof(w2in_prefix) - 1);
+
+        if (xclbin_path->empty()) {
+            std::fprintf(
+                stderr,
+                "ggml_xdna: q4k_q8k_w2in_256 profile requires an XCLBIN path\n");
             return false;
         }
 
@@ -455,6 +500,11 @@ static bool ggml_backend_xdna_init_kernel(
             "ggml_xdna: XRT kernel ready: %s\n",
             ctx->kernel_name.c_str());
 
+        // LLAMA-XDNA-NPU1-INTEGRATION-A1: controlled one-shot W2IN block
+        // invocation, enabled only by GGML_XDNA_W2IN_BLOCK_PROBE. Off the
+        // scheduler path; no effect when the variable is unset.
+        ggml_backend_xdna_w2in_block_probe(ctx);
+
         return true;
     } catch (const std::exception & e) {
         std::fprintf(
@@ -471,6 +521,333 @@ static bool ggml_backend_xdna_init_kernel(
         return false;
     }
 }
+// LLAMA-XDNA-NPU1-INTEGRATION-A1 - controlled single-block W2IN invocation.
+//
+// The scheduler-advertised Q4 profile of this backend expresses only the
+// [2560,M] Q4_K K=2560 geometry and builds its payloads as 10 x 152-byte
+// Q4_K transport blocks + 10 x 292-byte Q8_K blocks -> one f32 row. The
+// proven real npu1/AIE2 W2IN package has a different, smaller ABI: one
+// 256-element block, q8 (292 B) + compact (32 B) -> 32 x i32.
+//
+// This entry point runs exactly ONE submission of that block through this
+// backend's own XCLBIN / hw_context / kernel objects and its own BO policy:
+//   opcode 3, instruction BO CACHEABLE at group_id(1),
+//   data BOs HOST_ONLY at group_id(3)=q8, group_id(4)=compact,
+//   group_id(5)=out, every group id read live from the backend kernel.
+// It is enabled only when GGML_XDNA_W2IN_BLOCK_PROBE=<q8>,<compact>,<out>,<expected>
+// is set, so supports_op(), the scheduler, graph partitioning, tensor shapes
+// and every other payload path in this backend stay untouched.
+static bool ggml_backend_xdna_w2in_block_probe_read(
+        const std::string & path,
+        std::vector<uint8_t> & out) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+
+    if (!file) {
+        std::fprintf(stderr, "ggml_xdna: W2IN block probe: cannot open %s\n", path.c_str());
+        return false;
+    }
+
+    const std::streamsize size = file.tellg();
+
+    if (size <= 0) {
+        std::fprintf(stderr, "ggml_xdna: W2IN block probe: empty file %s\n", path.c_str());
+        return false;
+    }
+
+    out.resize(static_cast<size_t>(size));
+    file.seekg(0, std::ios::beg);
+
+    if (!file.read(reinterpret_cast<char *>(out.data()), size)) {
+        std::fprintf(stderr, "ggml_xdna: W2IN block probe: cannot read %s\n", path.c_str());
+        return false;
+    }
+
+    return true;
+}
+
+// MANDATORY pre-launch ordering rule for every HOST_ONLY BO the host wrote.
+//
+// Established by LLAMA-XDNA-OUTPUT-COMPLETION-A1/A2 on this host:
+//   * A1 (no pre-launch output flush): host prefill was visible instead of the
+//     device result at +1 us .. +265 ms -> control invalid.
+//   * A2 (same recipe + this flush): the golden block was visible at the FIRST
+//     read after run.wait(), +7 us, while sync(FROM_DEVICE) measured 0 us
+//     (a cache operation, never a barrier).
+// The flush is therefore required, not optional, and it includes output BOs
+// that the host prefilled (e.g. with a 0xCC sentinel).
+static void ggml_backend_xdna_sync_host_written_bo(
+        xrt::bo & bo,
+        const char * what) {
+    bo.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+
+    std::fprintf(
+        stderr,
+        "ggml_xdna: pre-launch sync(TO_DEVICE) %s\n",
+        what);
+}
+
+// Implementation of the env-gated one-shot W2IN block probe.
+//
+// LLAMA-XDNA-W2IN-ONESHOT-A1: this body must run at most ONCE per process.
+// The process-wide std::once_flag guard lives in the wrapper below
+// (ggml_backend_xdna_w2in_block_probe). The body itself is unchanged by this
+// experiment: kernel, XCLBIN, instructions, BO flags, sync rule, opcode,
+// scheduler and the K=2560 profiles are all untouched.
+static void ggml_backend_xdna_w2in_block_probe_impl(
+        ggml_backend_xdna_backend_context * ctx) {
+    const char * spec = std::getenv("GGML_XDNA_W2IN_BLOCK_PROBE");
+
+    if (spec == nullptr || spec[0] == '\0') {
+        return;
+    }
+
+    // Dedicated-profile gate: the block ABI is only valid for the proven
+    // npu1/AIE2 W2IN package, so the probe refuses to run on any other
+    // profile. K=2560 (per-row and batched) is never touched by this path.
+    if (ctx == nullptr ||
+        ctx->kernel_profile != ggml_backend_xdna_kernel_profile::q4k_q8k_w2in_256) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: W2IN block probe: refusing to run on profile '%s'; "
+            "the block ABI belongs to profile 'q4k_q8k_w2in_256'\n",
+            ctx == nullptr
+                ? "(null)"
+                : ggml_backend_xdna_kernel_profile_name(ctx->kernel_profile));
+        return;
+    }
+
+    if (ctx == nullptr || ctx->device_context == nullptr ||
+        ctx->device_context->xrt_device == nullptr || ctx->kernel == nullptr ||
+        ctx->instructions.empty()) {
+        std::fprintf(stderr, "ggml_xdna: W2IN block probe: backend kernel not ready\n");
+        return;
+    }
+
+    std::vector<std::string> paths;
+    {
+        const std::string s(spec);
+        size_t start = 0;
+
+        while (true) {
+            const size_t comma = s.find(',', start);
+            paths.push_back(s.substr(start, comma == std::string::npos ? std::string::npos : comma - start));
+            if (comma == std::string::npos) {
+                break;
+            }
+            start = comma + 1;
+        }
+    }
+
+    if (paths.size() != 4) {
+        std::fprintf(stderr, "ggml_xdna: W2IN block probe: need <q8>,<compact>,<out>,<expected>\n");
+        return;
+    }
+
+    constexpr size_t q8_bytes      = 292;  // native block_q8_K
+    constexpr size_t compact_bytes = 32;   // one packed Q4_K nibble region
+    constexpr size_t out_bytes     = 192;  // 128-byte block + 64-byte sentinel
+
+    std::vector<uint8_t> q8;
+    std::vector<uint8_t> compact;
+    std::vector<uint8_t> expected;
+
+    if (!ggml_backend_xdna_w2in_block_probe_read(paths[0], q8) ||
+        !ggml_backend_xdna_w2in_block_probe_read(paths[1], compact) ||
+        !ggml_backend_xdna_w2in_block_probe_read(paths[3], expected)) {
+        return;
+    }
+
+    if (q8.size() != q8_bytes || compact.size() != compact_bytes || expected.size() != 128) {
+        std::fprintf(stderr,
+                     "ggml_xdna: W2IN block probe: unexpected payload sizes q8=%zu compact=%zu expected=%zu\n",
+                     q8.size(), compact.size(), expected.size());
+        return;
+    }
+
+    try {
+        xrt::device & device = *ctx->device_context->xrt_device;
+        xrt::kernel & kernel = *ctx->kernel;
+
+        const uint32_t instruction_count = static_cast<uint32_t>(ctx->instructions.size());
+        const size_t   instruction_bytes = static_cast<size_t>(instruction_count) * sizeof(uint32_t);
+
+        xrt::bo bo_instr(device, instruction_bytes, XCL_BO_FLAGS_CACHEABLE, kernel.group_id(1));
+        xrt::bo bo_q8   (device, q8_bytes,          XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(3));
+        xrt::bo bo_comp (device, compact_bytes,     XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(4));
+        xrt::bo bo_out  (device, out_bytes,         XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(5));
+
+        void * buf_instr = bo_instr.map<void *>();
+        void * buf_q8    = bo_q8.map<void *>();
+        void * buf_comp  = bo_comp.map<void *>();
+        uint8_t * buf_out = bo_out.map<uint8_t *>();
+
+        std::memcpy(buf_instr, ctx->instructions.data(), instruction_bytes);
+        std::memcpy(buf_q8, q8.data(), q8_bytes);
+        std::memcpy(buf_comp, compact.data(), compact_bytes);
+        std::memset(buf_out, 0xCC, out_bytes);
+
+        std::fprintf(stderr,
+                     "ggml_xdna: W2IN block probe: kernel=%s instruction_words=%u "
+                     "groups=1:%d,3:%d,4:%d,5:%d\n",
+                     ctx->kernel_name.c_str(), instruction_count,
+                     kernel.group_id(1), kernel.group_id(3),
+                     kernel.group_id(4), kernel.group_id(5));
+        std::fprintf(stderr,
+                     "ggml_xdna: W2IN block probe: host_policy opcode=3 "
+                     "instr_bo=cacheable data_bos=host_only live_group_id=true\n");
+
+        // MANDATORY host ordering rule: flush every host-written HOST_ONLY BO to the
+        // device before the launch, including the prefilled output BO.
+        ggml_backend_xdna_sync_host_written_bo(bo_instr, "instruction BO (CACHEABLE)");
+        ggml_backend_xdna_sync_host_written_bo(bo_q8,    "q8 HOST_ONLY");
+        ggml_backend_xdna_sync_host_written_bo(bo_comp,  "compact HOST_ONLY");
+        ggml_backend_xdna_sync_host_written_bo(bo_out,   "output HOST_ONLY (prefilled 0xCC, mandatory)");
+
+        constexpr unsigned int opcode = 3;
+
+        auto run = kernel(opcode, bo_instr, instruction_count, bo_q8, bo_comp, bo_out);
+        const ert_cmd_state completion_state = run.wait();
+
+        // FIRST read, immediately after run.wait(), before any other BO operation.
+        size_t first_mismatch = 0;
+        for (size_t i = 0; i < 128; ++i) {
+            if (buf_out[i] != expected[i]) {
+                ++first_mismatch;
+            }
+        }
+
+        unsigned char first_sha[GGML_XDNA_SHA256_DIGEST_SIZE];
+        char first_hex[GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
+        ggml_xdna_sha256_hash(first_sha, buf_out, 128);
+        ggml_backend_xdna_format_sha256(first_sha, first_hex);
+
+        // Observation point only (documented as a cache operation, never a wait;
+        // it measures 0 us on this host). Not required for visibility once the
+        // pre-launch flush above has happened.
+        bo_out.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
+
+
+        unsigned char got_sha[GGML_XDNA_SHA256_DIGEST_SIZE];
+        unsigned char want_sha[GGML_XDNA_SHA256_DIGEST_SIZE];
+        char got_hex[GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
+        char want_hex[GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
+
+        ggml_xdna_sha256_hash(got_sha, buf_out, 128);
+        ggml_xdna_sha256_hash(want_sha, expected.data(), expected.size());
+        ggml_backend_xdna_format_sha256(got_sha, got_hex);
+        ggml_backend_xdna_format_sha256(want_sha, want_hex);
+
+        size_t mismatch = 0;
+        for (size_t i = 0; i < 128; ++i) {
+            if (buf_out[i] != expected[i]) {
+                ++mismatch;
+            }
+        }
+
+        bool sentinel_ok = true;
+        for (size_t i = 128; i < out_bytes; ++i) {
+            if (buf_out[i] != 0xCC) {
+                sentinel_ok = false;
+                break;
+            }
+        }
+
+        bool all_cc = true;
+        for (size_t i = 0; i < 128; ++i) {
+            if (buf_out[i] != 0xCC) {
+                all_cc = false;
+                break;
+            }
+        }
+
+        std::fprintf(stderr,
+                     "ggml_xdna: W2IN block probe: profile=%s abi=q8(292)+compact(32)->out(128) ",
+                     "submission=1 launches=1 run_state=%d %s\n",
+                     ggml_backend_xdna_kernel_profile_name(ctx->kernel_profile),
+                     static_cast<int>(completion_state),
+                     static_cast<int>(completion_state) == 4
+                         ? "(ERT_CMD_STATE_COMPLETED)"
+                         : "(unexpected)");
+        std::fprintf(stderr,
+                     "ggml_xdna: W2IN block probe: first_read_after_wait sha256=%s mismatch_bytes=%zu golden=%s\n",
+                     first_hex, first_mismatch,
+                     first_mismatch == 0 ? "true" : "false");
+        std::fprintf(stderr, "ggml_xdna: W2IN block probe: first_read_sha256=%s\n", first_hex);
+        std::fprintf(stderr, "ggml_xdna: W2IN block probe: after_sync_read_sha256=%s\n", got_hex);
+        std::fprintf(stderr, "ggml_xdna: W2IN block probe: expected_sha256=%s\n", want_hex);
+        std::fprintf(stderr, "ggml_xdna: W2IN block probe: first_read_golden=%s\n",
+                     first_mismatch == 0 ? "true" : "false");
+        std::fprintf(stderr,
+                     "ggml_xdna: W2IN block probe: golden_match=%s mismatch_bytes=%zu "
+                     "sentinel_ok=%s all_0xCC=%s\n",
+                     mismatch == 0 ? "true" : "false", mismatch,
+                     sentinel_ok ? "true" : "false", all_cc ? "true" : "false");
+
+        std::fprintf(stderr, "ggml_xdna: W2IN block probe: int32=");
+        for (size_t i = 0; i < 32; ++i) {
+            int32_t value = 0;
+            std::memcpy(&value, buf_out + i * sizeof(int32_t), sizeof(value));
+            std::fprintf(stderr, "%s%d", i == 0 ? "" : ",", value);
+        }
+        std::fprintf(stderr, "\n");
+
+        std::ofstream out_file(paths[2], std::ios::binary | std::ios::trunc);
+        if (out_file) {
+            out_file.write(reinterpret_cast<const char *>(buf_out),
+                           static_cast<std::streamsize>(out_bytes));
+            out_file.close();
+        } else {
+            std::fprintf(stderr, "ggml_xdna: W2IN block probe: cannot write %s\n", paths[2].c_str());
+        }
+
+        return;
+    } catch (const std::exception & e) {
+        std::fprintf(stderr, "ggml_xdna: W2IN block probe failed: %s\n", e.what());
+    } catch (...) {
+        std::fprintf(stderr, "ggml_xdna: W2IN block probe failed: unknown error\n");
+    }
+}
+
+// LLAMA-XDNA-W2IN-ONESHOT-A1 - process-wide one-shot guard.
+//
+// llama.cpp initializes the XDNA ACCEL backend twice in one process, so the
+// env-gated block probe used to run (and submit to the NPU) once per
+// initialization. This wrapper makes the probe execute at most once per
+// process, using a process-wide std::once_flag: exactly one caller runs the
+// implementation, every other caller returns without touching the device.
+//
+// Scope: the guard ONLY wraps GGML_XDNA_W2IN_BLOCK_PROBE. When that variable
+// is unset the guard is not consumed and backend initialization proceeds
+// exactly as before (the call site in init_kernel is unchanged, and the rest
+// of init_kernel always runs).
+static void ggml_backend_xdna_w2in_block_probe(
+        ggml_backend_xdna_backend_context * ctx) {
+    const char * spec = std::getenv("GGML_XDNA_W2IN_BLOCK_PROBE");
+
+    if (spec == nullptr || spec[0] == '\0') {
+        // Not requested: do not consume the one-shot, do not log, and leave
+        // normal backend initialization untouched.
+        return;
+    }
+
+    static std::once_flag once;
+    static std::atomic<unsigned> calls{0};
+
+    const unsigned call = calls.fetch_add(1) + 1;
+
+    if (call > 1) {
+        std::fprintf(
+            stderr,
+            "ggml_xdna: W2IN block probe: call #%u suppressed by the process-wide "
+            "one-shot guard (probe already executed in this process)\n",
+            call);
+    }
+
+    std::call_once(once, [ctx]() {
+        ggml_backend_xdna_w2in_block_probe_impl(ctx);
+    });
+}
+
 
 static bool ggml_backend_xdna_load_instructions(
         ggml_backend_xdna_backend_context * ctx) {
@@ -570,12 +947,27 @@ ggml_backend_xdna_kernel_profile_instruction_sha256(
         0x51, 0xdf, 0x37, 0xd3, 0x15, 0xce, 0x1d, 0x14,
     };
 
+    // K=2560 package (LLAMA-XDNA-K2560-INTEGRATION-A1: promoted to the freshly built and
+    // standalone-validated npu1/AIE2 package, instructions
+    // d5f1574ead7eb4610b6c8889b2801dae38b66c9bed2b7e25965aaadab0da7dff, 420 B / 105 words,
+    // target byte 0x03 = AIE2/npu1, 4-column full aie.device(npu1) build).
     static constexpr unsigned char q4k_q8k_k2560_sha256[
         GGML_XDNA_SHA256_DIGEST_SIZE] = {
-        0xc1, 0xc8, 0x45, 0xd8, 0x3f, 0xcd, 0x97, 0xa1,
-        0xaf, 0xff, 0x80, 0xab, 0x15, 0x0f, 0xc4, 0xe9,
-        0x10, 0x89, 0x30, 0x6a, 0x9e, 0xfa, 0xe1, 0x67,
-        0x82, 0xb5, 0xea, 0xdc, 0x38, 0x7c, 0x29, 0x14,
+        0xd5, 0xf1, 0x57, 0x4e, 0xad, 0x7e, 0xb4, 0x61,
+        0x0b, 0x6c, 0x88, 0x89, 0xb2, 0x80, 0x1d, 0xae,
+        0x38, 0xb6, 0x6c, 0x9b, 0xed, 0x2b, 0x7e, 0x25,
+        0x96, 0x5a, 0xaa, 0xda, 0xb0, 0xda, 0x7d, 0xff,
+    };
+
+    // Proven real npu1/AIE2 W2IN block package: instructions
+    // 0b2a720da5d9b90b2baa2eb81c6df6bcf7da281d06e2b54fa750d1b207a38ab4
+    // (420 B / 105 words, target byte 0x03 = AIE2/npu1).
+    static constexpr unsigned char q4k_q8k_w2in_256_sha256[
+        GGML_XDNA_SHA256_DIGEST_SIZE] = {
+        0x0b, 0x2a, 0x72, 0x0d, 0xa5, 0xd9, 0xb9, 0x0b,
+        0x2b, 0xaa, 0x2e, 0xb8, 0x1c, 0x6d, 0xf6, 0xbc,
+        0xf7, 0xda, 0x28, 0x1d, 0x06, 0xe2, 0xb5, 0x4f,
+        0xa7, 0x50, 0xd1, 0xb2, 0x07, 0xa3, 0x8a, 0xb4,
     };
 
     switch (profile) {
@@ -587,6 +979,9 @@ ggml_backend_xdna_kernel_profile_instruction_sha256(
 
         case ggml_backend_xdna_kernel_profile::q4k_q8k_k2560:
             return q4k_q8k_k2560_sha256;
+
+        case ggml_backend_xdna_kernel_profile::q4k_q8k_w2in_256:
+            return q4k_q8k_w2in_256_sha256;
     }
 
     return nullptr;
@@ -704,10 +1099,25 @@ ggml_backend_xdna_kernel_profile_xclbin_sha256_matches(
     static constexpr unsigned char
         q4k_q8k_k2560_sha256[
             GGML_XDNA_SHA256_DIGEST_SIZE] = {
-        0xe6, 0xba, 0x92, 0xbf, 0x3e, 0xa6, 0xed, 0x35,
-        0x70, 0x77, 0xb7, 0xc8, 0x36, 0xd5, 0x3e, 0x78,
-        0x4b, 0xc3, 0xa4, 0xf1, 0x5f, 0x79, 0x31, 0x20,
-        0xb8, 0xf3, 0xb9, 0x6f, 0x56, 0xec, 0xc6, 0x8f,
+        // K=2560 package XCLBIN (promoted: fresh npu1/AIE2 build,
+        // 483c57209e2b212d52fe6b155c53b7b67d1f26703dd679f0a4c27ec21c418628,
+        // 11656 B, AIE partition column_width 4, core ELF e_flags=0x2).
+        0x48, 0x3c, 0x57, 0x20, 0x9e, 0x2b, 0x21, 0x2d,
+        0x52, 0xfe, 0x6b, 0x15, 0x5c, 0x53, 0xb7, 0xb6,
+        0x7d, 0x1f, 0x26, 0x70, 0x3d, 0xd6, 0x79, 0xf0,
+        0xa4, 0xc2, 0x7e, 0xc2, 0x1c, 0x41, 0x86, 0x28,
+    };
+
+    // Proven real npu1/AIE2 W2IN block package XCLBIN:
+    // 1e06d3f236f5a12bee58d9a7c008431c0f3bd38172d3cab99548ea2174ccaa83
+    // (8918 B, uuid a304d3f5-…; core ELF 2196 B e_flags=0x2 = AIE2/npu1).
+    static constexpr unsigned char
+        q4k_q8k_w2in_256_sha256[
+            GGML_XDNA_SHA256_DIGEST_SIZE] = {
+        0x1e, 0x06, 0xd3, 0xf2, 0x36, 0xf5, 0xa1, 0x2b,
+        0xee, 0x58, 0xd9, 0xa7, 0xc0, 0x08, 0x43, 0x1c,
+        0x0f, 0x3b, 0xd3, 0x81, 0x72, 0xd3, 0xca, 0xb9,
+        0x95, 0x48, 0xea, 0x21, 0x74, 0xcc, 0xaa, 0x83,
     };
 
     switch (profile) {
@@ -724,6 +1134,12 @@ ggml_backend_xdna_kernel_profile_xclbin_sha256_matches(
             return std::memcmp(
                 digest,
                 q4k_q8k_k2560_sha256,
+                GGML_XDNA_SHA256_DIGEST_SIZE) == 0;
+
+        case ggml_backend_xdna_kernel_profile::q4k_q8k_w2in_256:
+            return std::memcmp(
+                digest,
+                q4k_q8k_w2in_256_sha256,
                 GGML_XDNA_SHA256_DIGEST_SIZE) == 0;
     }
 
@@ -1689,7 +2105,9 @@ static bool ggml_backend_xdna_run_batched_shape(
             state.buf_instr = state.bo_instr->map<void *>(); state.buf_q4 = state.bo_q4->map<void *>();
             state.buf_q8 = state.bo_q8->map<void *>(); state.buf_out = state.bo_out->map<float *>();
             std::memcpy(state.buf_instr, state.instructions.data(), instruction_count * sizeof(uint32_t));
-            state.bo_instr->sync(XCL_BO_SYNC_BO_TO_DEVICE); state.instruction_count = instruction_count; state.bos_initialized = true;
+            // LLAMA-XDNA-K2560-INTEGRATION-A1: mandatory host ordering rule.
+            ggml_backend_xdna_sync_host_written_bo(*state.bo_instr, "K=2560 batched instruction BO (CACHEABLE)");
+            state.instruction_count = instruction_count; state.bos_initialized = true;
         }
         else if (state.instruction_count != instruction_count || std::memcmp(state.buf_instr, state.instructions.data(), instruction_count * sizeof(uint32_t)) != 0) return false;
         if (!ggml_backend_xdna_q4_cache_apply(ctx, ggml_backend_xdna_q4_shape_from_rows(state.rows), q4_rows, state.rows, state.buf_q4)) {
@@ -1704,13 +2122,13 @@ static bool ggml_backend_xdna_run_batched_shape(
         }
         {
             const auto t0 = std::chrono::steady_clock::now();
-            state.bo_q4->sync(XCL_BO_SYNC_BO_TO_DEVICE); ++ctx->q4_to_device;
+            ggml_backend_xdna_sync_host_written_bo(*state.bo_q4, "K=2560 batched q4 transport (HOST_ONLY)"); ++ctx->q4_to_device;
             const auto t1 = std::chrono::steady_clock::now();
             ctx->timers.q4_sync_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
         }
         {
             const auto t0 = std::chrono::steady_clock::now();
-            state.bo_q8->sync(XCL_BO_SYNC_BO_TO_DEVICE); ++ctx->q8_to_device;
+            ggml_backend_xdna_sync_host_written_bo(*state.bo_q8, "K=2560 batched q8 activation (HOST_ONLY)"); ++ctx->q8_to_device;
             const auto t1 = std::chrono::steady_clock::now();
             ctx->timers.q8_sync_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
         }
@@ -1856,8 +2274,10 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
                 ctx->q4_m9216_instructions.data(),
                 instruction_bytes);
 
-            bo_instr->sync(
-                XCL_BO_SYNC_BO_TO_DEVICE);
+            // LLAMA-XDNA-K2560-INTEGRATION-A1: mandatory host ordering rule.
+            ggml_backend_xdna_sync_host_written_bo(
+                *bo_instr,
+                "K=2560 M=9216 instruction BO (CACHEABLE)");
 
             ctx->q4_m9216_bo_instr =
                 std::move(bo_instr);
@@ -1928,7 +2348,7 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
 
         {
             const auto t0 = std::chrono::steady_clock::now();
-            bo_q4.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+            ggml_backend_xdna_sync_host_written_bo(bo_q4, "K=2560 M=9216 q4 transport (HOST_ONLY)");
             ++ctx->q4_to_device;
             const auto t1 = std::chrono::steady_clock::now();
             ctx->timers.q4_sync_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -1936,7 +2356,7 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
 
         {
             const auto t0 = std::chrono::steady_clock::now();
-            bo_q8.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+            ggml_backend_xdna_sync_host_written_bo(bo_q8, "K=2560 M=9216 q8 activation (HOST_ONLY)");
             ++ctx->q8_to_device;
             const auto t1 = std::chrono::steady_clock::now();
             ctx->timers.q8_sync_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -2155,8 +2575,10 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560(
                 instructions,
                 instruction_bytes);
 
-            bo_instr->sync(
-                XCL_BO_SYNC_BO_TO_DEVICE);
+            // LLAMA-XDNA-K2560-INTEGRATION-A1: mandatory host ordering rule.
+            ggml_backend_xdna_sync_host_written_bo(
+                *bo_instr,
+                "K=2560 per-row instruction BO (CACHEABLE)");
 
             ctx->q4_bo_instr = std::move(bo_instr);
             ctx->q4_bo_q4 = std::move(bo_q4);
@@ -2211,8 +2633,13 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560(
             q4_transport.data(),
             q4_transport_row_bytes);
 
-        bo_q4.sync(
-            XCL_BO_SYNC_BO_TO_DEVICE);
+        // LLAMA-XDNA-K2560-INTEGRATION-A1: mandatory host ordering rule - flush
+        // every host-written HOST_ONLY BO before the launch. The output BO is never
+        // written by the host on this path (no prefill), so it needs no pre-launch
+        // flush; it is only read back after run.wait().
+        ggml_backend_xdna_sync_host_written_bo(
+            bo_q4,
+            "K=2560 per-row q4 transport (HOST_ONLY)");
 
         if (refresh_activation) {
             std::memcpy(
@@ -2220,8 +2647,9 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560(
                 q8_blocks.data(),
                 q8_row_bytes);
 
-            bo_q8.sync(
-                XCL_BO_SYNC_BO_TO_DEVICE);
+            ggml_backend_xdna_sync_host_written_bo(
+                bo_q8,
+                "K=2560 per-row q8 activation (HOST_ONLY)");
         }
 
 
@@ -2299,13 +2727,17 @@ ggml_backend_xdna_init_q4k_q8k_k2560_m9216(
         return false;
     }
 
+    // XDNA-Q4K-POWER2-PRODUCTION-INTEGRATION-A1: fingerprint re-pinned to the
+    // promoted power2-D1 package.  Only the XCLBIN fingerprint moved -- the
+    // instruction fingerprint below is byte-identical to the W2 command stream,
+    // because the power2 package changes only the core arithmetic.
     static constexpr unsigned char
         expected_xclbin_sha256[
             GGML_XDNA_SHA256_DIGEST_SIZE] = {
-        0x33, 0x9c, 0x39, 0xe5, 0x43, 0xd0, 0x02, 0x45,
-        0x7a, 0x43, 0x9f, 0xee, 0x8e, 0x80, 0x9a, 0xbf,
-        0xdb, 0x8f, 0xa0, 0x05, 0xe2, 0x02, 0x25, 0x3d,
-        0xfc, 0xca, 0x22, 0x89, 0x0e, 0xe9, 0x98, 0x28,
+        0x1c, 0xc7, 0x70, 0xff, 0xad, 0xcf, 0xee, 0xf2,
+        0x72, 0x94, 0xc5, 0xdb, 0x38, 0x3d, 0x79, 0x1f,
+        0x60, 0x4e, 0x51, 0x1c, 0x50, 0x7e, 0x24, 0xf0,
+        0xfd, 0x44, 0x07, 0x1a, 0x0c, 0xed, 0x2b, 0x32,
     };
 
     static constexpr unsigned char
@@ -2642,14 +3074,20 @@ static ggml_backend_t ggml_backend_xdna_device_init(
             const char * xclbin_sha;
             const char * instructions_sha;
         } shapes[] = {
+            // XDNA-Q4K-POWER2-PRODUCTION-INTEGRATION-A1: XCLBIN fingerprints re-pinned
+            // to the promoted power2-D1 packages (validated: 0 mismatches vs the CPU
+            // golden on all four shapes, speedup >= 1.08 each).  The instruction
+            // fingerprints are unchanged -- the power2 command stream is byte-identical
+            // to the promoted-W2 command stream (power2 changes only the core
+            // arithmetic, never the DMA/topology/placement).
             {"GGML_XDNA_Q4K_M1024_XCLBIN", 1024, &ggml_backend_xdna_backend_context::q4_m1024,
-                "b4238e2ec9c302832f7d0b592b7c8c004779403473f6a2bfe4512e663de081c9",
+                "0942b5967de9b4ae1fb1f95930194bda9ac8a4e709b9d4249b39c0876ea135ae",
                 "896b176c47abc9456b6744df36097982cc373f38306ec4cde39a51e1a3422b50"},
             {"GGML_XDNA_Q4K_M4096_XCLBIN", 4096, &ggml_backend_xdna_backend_context::q4_m4096,
-                "07fc35af0d8203fb2d7cd748e88bcd99a4febbcb7eb09a6e2e8e389af38b82ff",
+                "704feae5d5c65c135e1df298c5fb42a1bf5f04a5f4494a892de12efb3853e51f",
                 "965611200fb2bd4bfeb216726a464303ed9b88de4defffb6c4811c5f9b35a0be"},
             {"GGML_XDNA_Q4K_M8192_XCLBIN", 8192, &ggml_backend_xdna_backend_context::q4_m8192,
-                "1d066a247221ec16817ac7fa2ad5f096c8bc0a78652d757f17c9353006bb314c",
+                "2992dbaa20470cfb0d9931d978a9cda901cf722b5e1216c6ce655de607d792a9",
                 "b6c2bedb58c105e616b203be561136b81d2789b90ec14307817dad6504490695"},
         };
         for (const auto & shape : shapes) {
@@ -2820,9 +3258,37 @@ static bool ggml_backend_xdna_device_supports_op(
                 ggml_nbytes(op) ==
                     rows * sizeof(float);
         }
+
+        case ggml_backend_xdna_kernel_profile::q4k_q8k_w2in_256:
+            // Dedicated W2IN block profile (LLAMA-XDNA-W2IN-PROFILE-A1).
+            // The proven block ABI (q8 292 B + compact 32 B -> 32 x i32) has no
+            // scheduler-advertised GEMM geometry; it is driven exclusively by
+            // the explicit block probe on this profile, so the scheduler must
+            // never route an operation here. The K=2560 profiles are untouched.
+            return false;
     }
 
     return false;
+}
+
+// Permanent XDNA scheduler-offload policy: allow the scheduler to offload
+// host-resident operations to XDNA only when they satisfy the same
+// constraints enforced by supports_op(). supports_op() is the single source
+// of truth for XDNA offload eligibility, so the invariant is
+//
+//     OFFLOADABLE(op) <=> SUPPORTED(op)
+//
+// An unsupported operation stays on the CPU/general backend; a supported one
+// may be selected by the scheduler. This is the normal accelerator-offload
+// policy for host-resident operations, not a CPU bypass.
+static bool ggml_backend_xdna_device_offload_op(
+        ggml_backend_dev_t dev,
+        const struct ggml_tensor * op) {
+    // Delegate to supports_op(): never duplicate shape/type/layout rules here,
+    // and never widen supports_op(). The scheduler calls this for an operation
+    // whose weights live in a host (CPU) buffer, so accepting exactly what
+    // supports_op() accepts is what keeps the policy "nothing broader".
+    return ggml_backend_xdna_device_supports_op(dev, op);
 }
 
 static bool ggml_backend_xdna_device_supports_buft(
@@ -2845,7 +3311,7 @@ static const struct ggml_backend_device_i ggml_backend_xdna_device_i = {
     /* .buffer_from_host_ptr = */ ggml_backend_xdna_device_buffer_from_host_ptr,
     /* .supports_op          = */ ggml_backend_xdna_device_supports_op,
     /* .supports_buft        = */ ggml_backend_xdna_device_supports_buft,
-    /* .offload_op           = */ nullptr,
+    /* .offload_op           = */ ggml_backend_xdna_device_offload_op,
     /* .event_new            = */ nullptr,
     /* .event_free           = */ nullptr,
     /* .event_synchronize    = */ nullptr,
