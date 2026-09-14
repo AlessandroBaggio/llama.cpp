@@ -2727,17 +2727,21 @@ ggml_backend_xdna_init_q4k_q8k_k2560_m9216(
         return false;
     }
 
-    // XDNA-Q4K-POWER2-PRODUCTION-INTEGRATION-A1: fingerprint re-pinned to the
-    // promoted power2-D1 package.  Only the XCLBIN fingerprint moved -- the
-    // instruction fingerprint below is byte-identical to the W2 command stream,
-    // because the power2 package changes only the core arithmetic.
+    // XDNA-MLIR-AIE-V1.4.3-PRODUCTION-PROMOTION-A1: fingerprint re-pinned to the
+    // promoted mlir-aie 1.4.3 / llvm-aie 22 package.  Only the XCLBIN fingerprint
+    // moved -- the instruction fingerprint below is byte-identical to the
+    // previously promoted command stream, because the toolchain promotion changes
+    // only the compiled core arithmetic.
+    //
+    // Historical context (XDNA-Q4K-POWER2-PRODUCTION-INTEGRATION-A1): the earlier
+    // re-pin moved only the XCLBIN fingerprint for the same reason.
     static constexpr unsigned char
         expected_xclbin_sha256[
             GGML_XDNA_SHA256_DIGEST_SIZE] = {
-        0x1c, 0xc7, 0x70, 0xff, 0xad, 0xcf, 0xee, 0xf2,
-        0x72, 0x94, 0xc5, 0xdb, 0x38, 0x3d, 0x79, 0x1f,
-        0x60, 0x4e, 0x51, 0x1c, 0x50, 0x7e, 0x24, 0xf0,
-        0xfd, 0x44, 0x07, 0x1a, 0x0c, 0xed, 0x2b, 0x32,
+        0x41, 0x1f, 0x0f, 0x0e, 0x78, 0x1a, 0x48, 0x6d,
+        0xb1, 0x65, 0xe8, 0x47, 0x70, 0x46, 0xd7, 0x05,
+        0xe0, 0xfe, 0xdc, 0x71, 0x9b, 0xe1, 0x8c, 0xd4,
+        0x6a, 0xeb, 0x3d, 0x11, 0x2f, 0x86, 0xb0, 0x8a,
     };
 
     static constexpr unsigned char
@@ -3074,20 +3078,24 @@ static ggml_backend_t ggml_backend_xdna_device_init(
             const char * xclbin_sha;
             const char * instructions_sha;
         } shapes[] = {
-            // XDNA-Q4K-POWER2-PRODUCTION-INTEGRATION-A1: XCLBIN fingerprints re-pinned
-            // to the promoted power2-D1 packages (validated: 0 mismatches vs the CPU
-            // golden on all four shapes, speedup >= 1.08 each).  The instruction
-            // fingerprints are unchanged -- the power2 command stream is byte-identical
-            // to the promoted-W2 command stream (power2 changes only the core
-            // arithmetic, never the DMA/topology/placement).
+            // XDNA-MLIR-AIE-V1.4.3-PRODUCTION-PROMOTION-A1: XCLBIN fingerprints re-pinned
+            // to the promoted mlir-aie 1.4.3 / llvm-aie 22 packages.  The instruction
+            // fingerprints are unchanged -- the promoted command streams are
+            // byte-identical to the previously promoted ones (the toolchain promotion
+            // changes only the compiled core arithmetic, never the
+            // DMA/topology/placement).
+            //
+            // Historical context (XDNA-Q4K-POWER2-PRODUCTION-INTEGRATION-A1): the earlier
+            // re-pin was for the same reason -- XCLBIN fingerprints move, command
+            // streams do not.
             {"GGML_XDNA_Q4K_M1024_XCLBIN", 1024, &ggml_backend_xdna_backend_context::q4_m1024,
-                "0942b5967de9b4ae1fb1f95930194bda9ac8a4e709b9d4249b39c0876ea135ae",
+                "1ad7c4bd1a4c3ed2d798b3f3c588711d90d20c68bbe890b3e5a881789787c7ff",
                 "896b176c47abc9456b6744df36097982cc373f38306ec4cde39a51e1a3422b50"},
             {"GGML_XDNA_Q4K_M4096_XCLBIN", 4096, &ggml_backend_xdna_backend_context::q4_m4096,
-                "704feae5d5c65c135e1df298c5fb42a1bf5f04a5f4494a892de12efb3853e51f",
+                "f0158a913ce9b3df17b73721286bd987cf8278f13038ed667ce0893458ba4a9d",
                 "965611200fb2bd4bfeb216726a464303ed9b88de4defffb6c4811c5f9b35a0be"},
             {"GGML_XDNA_Q4K_M8192_XCLBIN", 8192, &ggml_backend_xdna_backend_context::q4_m8192,
-                "2992dbaa20470cfb0d9931d978a9cda901cf722b5e1216c6ce655de607d792a9",
+                "cd3806ab892b0e30c9ea7b12a6f2fb7f253ab53a91d9c662b7006a7b8c149806",
                 "b6c2bedb58c105e616b203be561136b81d2789b90ec14307817dad6504490695"},
         };
         for (const auto & shape : shapes) {
