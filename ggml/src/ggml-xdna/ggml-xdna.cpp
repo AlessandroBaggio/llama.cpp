@@ -213,6 +213,27 @@ struct ggml_backend_xdna_backend_context {
     bool q4_m9216_bos_initialized = false;
     bool q4_m9216_available = false;
 
+    // LLAMA-XDNA-Q4K-PERSISTENT-WEIGHTS-A1: per-weight-tensor persistent Q4
+    // transport BOs for the M=9216 path. Keyed by the q4 source tensor data
+    // pointer, which is stable for the lifetime of an immutable weight tensor.
+    // Each BO is created, filled and synced exactly once; every later token
+    // reuses it with no repack and no full-weight host memcpy. The shared
+    // q4_m9216_bo_q4 above remains the fallback whenever this path is
+    // disabled, unavailable or over budget.
+    struct q4_m9216_weight_bo_entry {
+        std::unique_ptr<xrt::bo> bo;
+        size_t mapped_bytes = 0;
+    };
+
+    std::unordered_map<const void *, q4_m9216_weight_bo_entry> q4_m9216_weight_bos;
+    bool   q4_weight_bo_enabled = true;
+    bool   q4_weight_bo_env_checked = false;
+    size_t q4_weight_bo_bytes = 0;
+    uint64_t weight_bo_creates = 0;
+    uint64_t weight_bo_reuses = 0;
+    uint64_t weight_bo_failures = 0;
+    uint64_t weight_bo_cap_hits = 0;
+
     ggml_backend_xdna_batched_state q4_m1024;
     ggml_backend_xdna_batched_state q4_m4096;
     ggml_backend_xdna_batched_state q4_m8192;
@@ -1339,6 +1360,16 @@ static void ggml_backend_xdna_free(ggml_backend_t backend) {
             static_cast<unsigned long long>(ctx->q4_cache.transport_bytes_copied));
 
         std::fprintf(stderr,
+            "ggml_xdna: persistent_weight_bos enabled=%d tensors=%zu bytes=%zu creates=%llu reuses=%llu failures=%llu cap_hits=%llu\n",
+            ctx->q4_weight_bo_enabled ? 1 : 0,
+            ctx->q4_m9216_weight_bos.size(),
+            ctx->q4_weight_bo_bytes,
+            static_cast<unsigned long long>(ctx->weight_bo_creates),
+            static_cast<unsigned long long>(ctx->weight_bo_reuses),
+            static_cast<unsigned long long>(ctx->weight_bo_failures),
+            static_cast<unsigned long long>(ctx->weight_bo_cap_hits));
+
+        std::fprintf(stderr,
             "ggml_xdna: timers_ms q4_conversion=%.3f q4_cached_memcpy=%.3f q4_sync=%.3f q8_quant=%.3f q8_sync=%.3f xrt_submit_wait=%.3f output=%.3f\n",
             ctx->timers.q4_conversion_ms,
             ctx->timers.q4_cached_memcpy_ms,
@@ -2156,6 +2187,96 @@ static bool ggml_backend_xdna_run_batched_shape(
         return true;
     } catch (...) { return false; }
 }
+// LLAMA-XDNA-Q4K-PERSISTENT-WEIGHTS-A1
+//
+// Returns a persistent, already-filled, already-synced Q4 transport BO for one
+// M=9216 weight tensor, or nullptr when the persistent path is disabled,
+// unavailable or over budget. On nullptr the caller uses the existing shared
+// BO plus the existing per-call convert/cache path, so behaviour is unchanged.
+//
+// The BO is created on first use of that tensor, filled exactly once through the
+// existing lossless, deterministic native Q4_K -> 152-byte transport conversion
+// (144-byte GGML block + fp32 d + fp32 dmin), synced to the device exactly once,
+// and then reused byte-for-byte by every later token.
+static xrt::bo * ggml_backend_xdna_m9216_weight_bo(
+        ggml_backend_xdna_backend_context * ctx,
+        const void * q4_rows,
+        size_t transport_bytes) {
+    using entry_t =
+        ggml_backend_xdna_backend_context::q4_m9216_weight_bo_entry;
+
+    // The M=9216 weight set is ~897 MiB of transport bytes. 2 GiB leaves
+    // headroom for the other shapes while refusing unbounded growth.
+    constexpr size_t budget_bytes = 2ull * 1024 * 1024 * 1024;
+
+    if (!ctx->q4_weight_bo_env_checked) {
+        const char * v = std::getenv("GGML_XDNA_Q4K_PERSISTENT_WEIGHTS");
+        ctx->q4_weight_bo_enabled =
+            (v == nullptr) || (std::strcmp(v, "0") != 0);
+        ctx->q4_weight_bo_env_checked = true;
+        std::fprintf(stderr,
+            "ggml_xdna: Q4 persistent weight BOs %s\n",
+            ctx->q4_weight_bo_enabled ? "ENABLED" : "disabled");
+    }
+
+    if (!ctx->q4_weight_bo_enabled) {
+        return nullptr;
+    }
+
+    auto it = ctx->q4_m9216_weight_bos.find(q4_rows);
+    if (it != ctx->q4_m9216_weight_bos.end()) {
+        ++ctx->weight_bo_reuses;
+        return it->second.bo.get();
+    }
+
+    if (ctx->q4_weight_bo_bytes + transport_bytes > budget_bytes) {
+        ++ctx->weight_bo_cap_hits;
+        return nullptr;
+    }
+
+    try {
+        auto bo = std::make_unique<xrt::bo>(
+            *ctx->device_context->xrt_device,
+            transport_bytes,
+            XRT_BO_FLAGS_HOST_ONLY,
+            ctx->q4_m9216_kernel->group_id(3));
+
+        void * mapped = bo->map<void *>();
+
+        if (!ggml_backend_xdna_q4_cache_apply(
+                ctx, ggml_backend_xdna_q4_shape::m9216,
+                q4_rows, 9216, mapped)) {
+            ++ctx->weight_bo_failures;
+            return nullptr;
+        }
+
+        ggml_backend_xdna_sync_host_written_bo(
+            *bo, "M=9216 persistent weight BO (HOST_ONLY, one-time)");
+
+        entry_t entry;
+        entry.mapped_bytes = transport_bytes;
+        entry.bo = std::move(bo);
+
+        auto & stored = ctx->q4_m9216_weight_bos[q4_rows];
+        stored = std::move(entry);
+
+        ctx->q4_weight_bo_bytes += transport_bytes;
+        ++ctx->weight_bo_creates;
+
+        return stored.bo.get();
+    } catch (const std::exception & e) {
+        ++ctx->weight_bo_failures;
+        std::fprintf(stderr,
+            "ggml_xdna: persistent weight BO allocation failed (%.2f MiB): %s\n",
+            static_cast<double>(transport_bytes) / (1024.0 * 1024.0),
+            e.what());
+        return nullptr;
+    } catch (...) {
+        ++ctx->weight_bo_failures;
+        return nullptr;
+    }
+}
+
 static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
         ggml_backend_t backend,
         const void * q4_rows,
@@ -2321,8 +2442,17 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
             return false;
         }
 
+        // LLAMA-XDNA-Q4K-PERSISTENT-WEIGHTS-A1: prefer this tensor's own
+        // persistent, already-filled, already-synced BO.  nullptr means the
+        // existing shared BO + per-call convert/sync path below is used.
+        xrt::bo * persistent_q4 =
+            ggml_backend_xdna_m9216_weight_bo(
+                ctx, q4_rows, q4_transport_bytes);
+
         xrt::bo & bo_q4 =
-            *ctx->q4_m9216_bo_q4;
+            persistent_q4 != nullptr
+                ? *persistent_q4
+                : *ctx->q4_m9216_bo_q4;
 
         xrt::bo & bo_q8 =
             *ctx->q4_m9216_bo_q8;
@@ -2330,10 +2460,12 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
         xrt::bo & bo_out =
             *ctx->q4_m9216_bo_out;
 
-        if (!ggml_backend_xdna_q4_cache_apply(
-                ctx, ggml_backend_xdna_q4_shape::m9216,
-                q4_rows, rows, ctx->q4_m9216_buf_q4)) {
-            return false;
+        if (persistent_q4 == nullptr) {
+            if (!ggml_backend_xdna_q4_cache_apply(
+                    ctx, ggml_backend_xdna_q4_shape::m9216,
+                    q4_rows, rows, ctx->q4_m9216_buf_q4)) {
+                return false;
+            }
         }
 
         {
@@ -2346,7 +2478,7 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
             ctx->timers.q8_quant_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
         }
 
-        {
+        if (persistent_q4 == nullptr) {
             const auto t0 = std::chrono::steady_clock::now();
             ggml_backend_xdna_sync_host_written_bo(bo_q4, "K=2560 M=9216 q4 transport (HOST_ONLY)");
             ++ctx->q4_to_device;
