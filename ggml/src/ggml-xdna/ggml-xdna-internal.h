@@ -45,7 +45,7 @@ enum class ggml_backend_xdna_kernel_profile {
     none,
     i16_256,
     q4k_q8k_k2560,
-    // LLAMA-XDNA-W2IN-PROFILE-A1: dedicated slot for the proven real npu1/AIE2
+    // W2IN block profile: dedicated slot for the proven real npu1/AIE2
     // W2IN block kernel. It carries a different, smaller ABI than K=2560 and
     // advertises no scheduler ops; it is driven only by the explicit block probe.
     q4k_q8k_w2in_256,
@@ -84,7 +84,7 @@ struct ggml_backend_xdna_context {
     bool q4_m8192_available = false;
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
     bool stop_after_xrt_module_preflight = false;
-    bool a7g3_identity_gate_failed = false;
+    bool identity_gate_failed = false;
 #endif
 };
 
@@ -300,7 +300,7 @@ struct ggml_backend_xdna_backend_context {
     bool q4_m9216_available = false;
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
     uint64_t m9216_diagnostic_ordinal = 0;
-    std::chrono::steady_clock::time_point a7c_diagnostics_epoch = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point diagnostics_epoch = std::chrono::steady_clock::now();
     uint64_t m9216_next_resource_generation = 0;
     uint64_t m9216_hw_context_generation = 0;
     uint64_t m9216_kernel_generation = 0;
@@ -308,19 +308,19 @@ struct ggml_backend_xdna_backend_context {
     uint64_t m9216_shared_q4_bo_generation = 0;
     uint64_t m9216_q8_bo_generation = 0;
     uint64_t m9216_output_bo_generation = 0;
-    bool a7f_q4_control_gate_checked = false;
-    bool a7f_q4_control_enabled = false;
-    bool a7f_q4_control_snapshot_valid = false;
-    std::unique_ptr<uint8_t[]> a7f_q4_control_snapshot;
-    size_t a7f_q4_control_snapshot_bytes = 0;
-    char a7f_q4_control_snapshot_sha256[65] = {};
-    char a7f_q4_source_instruction_sha256[65] = {};
-    uint64_t a7f_q4_source_backend_id = 0;
-    uint64_t a7f_q4_source_correlation_id = 0;
-    uint64_t a7f_q4_source_xrt_sequence = 0;
-    uint64_t a7f_q4_source_generations[7] = {};
-    const void * a7f_q4_source_objects[7] = {};
-    const void * a7f_q4_source_xclbin_identity = nullptr;
+    bool q4_control_gate_checked = false;
+    bool q4_control_enabled = false;
+    bool q4_control_snapshot_valid = false;
+    std::unique_ptr<uint8_t[]> q4_control_snapshot;
+    size_t q4_control_snapshot_bytes = 0;
+    char q4_control_snapshot_sha256[65] = {};
+    char q4_control_source_instruction_sha256[65] = {};
+    uint64_t q4_control_source_backend_id = 0;
+    uint64_t q4_control_source_correlation_id = 0;
+    uint64_t q4_control_source_xrt_sequence = 0;
+    uint64_t q4_control_source_generations[7] = {};
+    const void * q4_control_source_objects[7] = {};
+    const void * q4_control_source_xclbin_identity = nullptr;
 #endif
     bool exact_history_replay_failed = false;
     uint64_t replay_records_total = 0, replay_historical_records = 0, replay_target_records = 0;
@@ -341,7 +341,7 @@ struct ggml_backend_xdna_backend_context {
     uint64_t replay_transition_m4096_submitted = 0, replay_transition_m4096_wait_completed = 0, replay_transition_m4096_output_validated = 0;
     uint64_t replay_transition_id8_submitted = 0, replay_transition_id8_wait_completed = 0, replay_transition_id8_output_validated = 0;
 
-    // LLAMA-XDNA-Q4K-PERSISTENT-WEIGHTS-A1: per-weight-tensor persistent Q4
+    // persistent Q4_K weights: per-weight-tensor persistent Q4
     // transport BOs for the M=9216 path. Keyed by the q4 source tensor data
     // pointer, which is stable for the lifetime of an immutable weight tensor.
     // Each BO is created, filled and synced exactly once; every later token
@@ -433,8 +433,8 @@ void ggml_backend_xdna_sync_host_written_bo(xrt::bo & bo, const char * what);
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
 // Private direct-link entrypoint, compiled only when GGML_XDNA_BUILD_DIAGNOSTICS is ON.
 GGML_BACKEND_API int ggml_backend_xdna_diagnostic_replay(ggml_backend_t backend, const char * plan_path);
-GGML_BACKEND_API int ggml_backend_xdna_diagnostic_execute_gn1_record(
-        const ggml_xdna_gn1::validated_execution_authorization & token, const ggml_xdna_gn1::plan_identity & identity,
+GGML_BACKEND_API int ggml_backend_xdna_diagnostic_execute_causal_record(
+        const ggml_xdna_causal::validated_execution_authorization & token, const ggml_xdna_causal::plan_identity & identity,
         ggml_backend_t backend, size_t rows, const void * q4_native, size_t q4_native_bytes,
         const void * q8_bytes, size_t q8_bytes_size, void * output, size_t output_bytes,
         const char * cell, const char * selected_prefix_ids, const char * mode, const char * pair, size_t execution_ordinal,

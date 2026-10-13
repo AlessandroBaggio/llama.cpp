@@ -800,6 +800,9 @@ struct ggml_backend_sched {
     struct ggml_backend_sched_split * splits;
     int n_splits;
     int splits_capacity;
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
+    uint64_t split_generation = 0;
+#endif
 
     // pipeline parallelism support
     int n_copies;
@@ -882,8 +885,18 @@ static int ggml_backend_sched_backend_from_buffer(ggml_backend_sched_t sched, co
 
     // find highest prio backend that supports the buffer type and the op
     for (int i = 0; i < sched->n_backends; i++) {
-        if (ggml_backend_supports_buft(sched->backends[i], buffer->buft) &&
-            ggml_backend_supports_op(sched->backends[i], op)) {
+        const bool buft_ok = ggml_backend_supports_buft(sched->backends[i], buffer->buft);
+        const bool op_ok = buft_ok && ggml_backend_supports_op(sched->backends[i], op);
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
+        if (std::getenv("GGML_XDNA_EXECUTION_TRACE") != nullptr &&
+                tensor->type == GGML_TYPE_Q4_K && tensor->ne[0] == 2560 && tensor->ne[1] == 9216) {
+            std::fprintf(stderr, "XDNA_EXECUTION_TRACE backend_from_buffer tensor=%s backend_id=%d backend=%s buffer=%s buft=%s usage=%d buft_ok=%d op_ok=%d\n",
+                    tensor->name, i, ggml_backend_name(sched->backends[i]),
+                    ggml_backend_buffer_name(buffer), ggml_backend_buft_name(buffer->buft),
+                    static_cast<int>(buffer->usage), buft_ok ? 1 : 0, op_ok ? 1 : 0);
+        }
+#endif
+        if (op_ok) {
             return i;
         }
     }
@@ -906,11 +919,80 @@ static char causes[GGML_DEFAULT_GRAPH_SIZE*16 + GGML_SCHED_MAX_SPLITS_DEBUG*GGML
 #define GET_CAUSE(node) ""
 #endif
 
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
+static bool xdna_assignment_trace_candidate(const struct ggml_tensor * tensor) {
+    if (std::getenv("GGML_XDNA_STOP_AFTER_RUNTIME_SPLIT") == nullptr || tensor == nullptr ||
+            tensor->op != GGML_OP_MUL_MAT || tensor->src[0] == nullptr || tensor->src[1] == nullptr ||
+            tensor->src[0]->type != GGML_TYPE_Q4_K || tensor->src[0]->ne[0] != 2560) {
+        return false;
+    }
+    const char * name = tensor->name;
+    return std::strstr(name, "Vcur") != nullptr || std::strstr(name, "z-") != nullptr ||
+            std::strstr(name, "Qcur_full") != nullptr || std::strstr(name, "ffn_gate") != nullptr ||
+            std::strstr(name, "ffn_up") != nullptr;
+}
+
+static void xdna_assignment_trace(ggml_backend_sched_t sched, struct ggml_cgraph * graph, const char * pass) {
+    if (std::getenv("GGML_XDNA_STOP_AFTER_RUNTIME_SPLIT") == nullptr) {
+        return;
+    }
+    int xdna_count = 0;
+    int cpu_count = 0;
+    int rhs1_count = 0;
+    int rhs_other_count = 0;
+    for (int i = 0; i < graph->n_nodes; ++i) {
+        struct ggml_tensor * node = graph->nodes[i];
+        if (!xdna_assignment_trace_candidate(node)) {
+            continue;
+        }
+        const int64_t rhs = node->src[1]->ne[1];
+        if (rhs == 1) { ++rhs1_count; } else { ++rhs_other_count; }
+        const int backend_id = tensor_backend_id(node);
+        if (backend_id >= 0 && std::strstr(ggml_backend_name(sched->backends[backend_id]), "XDNA") != nullptr) {
+            ++xdna_count;
+        } else if (backend_id == sched->n_backends - 1) {
+            ++cpu_count;
+        }
+        std::fprintf(stderr, "XDNA_BACKEND_ASSIGNMENT assignment pass=%s node=%s rhs=%lld backend_id=%d backend=%s\n", pass, node->name,
+                static_cast<long long>(rhs), backend_id, backend_id >= 0 ? ggml_backend_name(sched->backends[backend_id]) : "unassigned");
+    }
+    std::fprintf(stderr, "XDNA_BACKEND_ASSIGNMENT assignment pass=%s q4k_nodes_xdna=%d q4k_nodes_cpu=%d rhs1=%d rhs_other=%d\n",
+            pass, xdna_count, cpu_count, rhs1_count, rhs_other_count);
+}
+#else
+// ponytail: no-op macros erase STOP_AFTER_RUNTIME_SPLIT trace hooks from production.
+#define xdna_assignment_trace_candidate(tensor) false
+#define xdna_assignment_trace(sched, graph, pass) ((void) 0)
+#endif
+
 // returns the backend that should be used for the node based on the current locations
 static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, struct ggml_tensor * tensor) {
     // assign pre-allocated nodes to their backend
     int cur_backend_id = ggml_backend_sched_backend_from_buffer(sched, tensor, tensor);
+    if (xdna_assignment_trace_candidate(tensor)) {
+        for (int b = 0; b < sched->n_backends; ++b) {
+            if (std::strstr(ggml_backend_name(sched->backends[b]), "XDNA") == nullptr) {
+                continue;
+            }
+            ggml_backend_buffer_t dst_buffer = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
+            ggml_backend_buffer_t src_buffer = tensor->src[0] != nullptr ? tensor->src[0]->buffer : nullptr;
+            const bool buft_ok = dst_buffer != nullptr && ggml_backend_supports_buft(sched->backends[b], ggml_backend_buffer_get_type(dst_buffer));
+            const bool op_ok = ggml_backend_supports_op(sched->backends[b], tensor);
+            std::fprintf(stderr, "XDNA_BACKEND_ASSIGNMENT pass=1 node=%s backend_id=%d dst_buft=%s src_buft=%s dst_host=%d src_host=%d supports_buft=%d supports_op=%d op_offload=%d src_backend_id=%d\n",
+                    tensor->name, b, dst_buffer ? ggml_backend_buft_name(ggml_backend_buffer_get_type(dst_buffer)) : "none",
+                    src_buffer ? ggml_backend_buft_name(ggml_backend_buffer_get_type(src_buffer)) : "none",
+                    dst_buffer ? ggml_backend_buffer_is_host(dst_buffer) : 0, src_buffer ? ggml_backend_buffer_is_host(src_buffer) : 0,
+                    buft_ok ? 1 : 0, op_ok ? 1 : 0, sched->op_offload ? 1 : 0,
+                    tensor->src[0] && tensor->src[0]->buffer ? ggml_backend_sched_backend_from_buffer(sched, tensor->src[0], tensor) : -1);
+        }
+    }
     if (cur_backend_id != -1) {
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
+    if (std::getenv("GGML_XDNA_EXECUTION_TRACE") != nullptr && tensor->op == GGML_OP_MUL_MAT && tensor->src[0] != nullptr && tensor->src[0]->type == GGML_TYPE_Q4_K && tensor->src[0]->ne[0] == 2560 && tensor->src[0]->ne[1] == 9216) {
+        ggml_backend_buffer_t b = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
+        std::fprintf(stderr, "XDNA_EXECUTION_TRACE node_backend tensor=%s selected_id=%d buffer=%s buft=%s\n", tensor->name, cur_backend_id, b ? ggml_backend_buffer_name(b) : "none", b ? ggml_backend_buft_name(ggml_backend_buffer_get_type(b)) : "none");
+    }
+#endif
         SET_CAUSE(tensor, "1.dst");
         return cur_backend_id;
     }
@@ -956,9 +1038,25 @@ static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, st
             if (src->buffer != NULL && src->buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS) {
                 int src_backend_id = ggml_backend_sched_backend_from_buffer(sched, src, tensor);
                 // check if a backend with higher prio wants to offload the op
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
+                const bool src_host = ggml_backend_buffer_is_host(src->buffer);
+                if (xdna_assignment_trace_candidate(tensor)) {
+                    std::fprintf(stderr, "XDNA_BACKEND_ASSIGNMENT offload_check node=%s op_offload=%d src_backend_id=%d cpu_id=%d src_host=%d usage=%d\n",
+                            tensor->name, sched->op_offload ? 1 : 0, src_backend_id, sched->n_backends - 1,
+                            src_host ? 1 : 0, (int) src->buffer->usage);
+                }
+                if (sched->op_offload && src_backend_id == sched->n_backends - 1 && src_host) {
+#else
                 if (sched->op_offload && src_backend_id == sched->n_backends - 1 && ggml_backend_buffer_is_host(src->buffer)) {
+#endif
                     for (int b = 0; b < src_backend_id; b++) {
-                        if (ggml_backend_supports_op(sched->backends[b], tensor) && ggml_backend_offload_op(sched->backends[b], tensor)) {
+                        const bool supported = ggml_backend_supports_op(sched->backends[b], tensor);
+                        const bool offloadable = supported && ggml_backend_offload_op(sched->backends[b], tensor);
+                        if (xdna_assignment_trace_candidate(tensor)) {
+                            std::fprintf(stderr, "XDNA_BACKEND_ASSIGNMENT offload_result node=%s backend_id=%d supports_op=%d offload_op_called=%d offload_op=%d\n",
+                                    tensor->name, b, supported ? 1 : 0, supported ? 1 : 0, offloadable ? 1 : 0);
+                        }
+                        if (offloadable) {
                             SET_CAUSE(tensor, "1.off");
                             return b;
                         }
@@ -1051,9 +1149,14 @@ static void ggml_backend_sched_set_if_supported(ggml_backend_sched_t sched, stru
     }
 }
 
+
+
 // assigns backends to ops and splits the graph into subgraphs that can be computed on the same backend
 void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
     // reset splits
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
+    sched->split_generation++;
+#endif
     sched->n_splits = 0;
     sched->n_graph_inputs = 0;
     sched->is_reset = false;
@@ -1110,6 +1213,7 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         }
     }
 
+    xdna_assignment_trace(sched, graph, "1");
     // pass 2: expand current backend assignments
     // assign the same backend to adjacent nodes
     // expand gpu backends (i.e. non last prio) up and down, ignoring cpu (the lowest priority backend)
@@ -1190,6 +1294,7 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         }
     }
 
+    xdna_assignment_trace(sched, graph, "2");
     // pass 3: upgrade nodes to higher prio backends with compatible buffer types
     // if the tensor is already in the same buffer type (*) as another higher priority backend, we should move it there
     // however, we also need to verify that the sources are in compatible buffer types
@@ -1251,6 +1356,7 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         }
     }
 
+    xdna_assignment_trace(sched, graph, "3");
     // pass 4: assign backends to remaining src from dst and view_src
     for (int i = 0; i < graph->n_nodes; i++) {
         struct ggml_tensor * node = graph->nodes[i];
@@ -1283,6 +1389,7 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         GGML_ASSERT(*cur_backend_id != -1);
     }
 
+    xdna_assignment_trace(sched, graph, "4");
     // pass 5: split graph, find tensors that need to be copied
     {
         int i_split = 0;
@@ -1423,6 +1530,18 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         split->i_end = graph->n_nodes;
         sched->n_splits = i_split + 1;
     }
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
+        if (std::getenv("GGML_XDNA_SCHED_PROVENANCE_TRACE") != nullptr) {
+            std::fprintf(stderr, "XDNA_SCHEDULER_PROVENANCE split_generation=%llu graph=%p nodes=%d n_splits=%d\n",
+                    static_cast<unsigned long long>(sched->split_generation), (void *) graph, graph->n_nodes, sched->n_splits);
+            for (int s = 0; s < sched->n_splits; ++s) {
+                const auto & split_trace = sched->splits[s];
+                std::fprintf(stderr, "XDNA_SCHEDULER_PROVENANCE split=%d backend=%s nodes=%d i_start=%d i_end=%d inputs=%d\n",
+                        s, ggml_backend_name(sched->backends[split_trace.backend_id]),
+                        split_trace.i_end - split_trace.i_start, split_trace.i_start, split_trace.i_end, split_trace.n_inputs);
+            }
+        }
+#endif
 
     if (sched->debug) {
         ggml_backend_sched_print_assignments(sched, graph);
@@ -1592,6 +1711,12 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
 }
 
 static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t sched) {
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
+    const bool execution_trace = std::getenv("GGML_XDNA_EXECUTION_TRACE") != nullptr;
+    if (execution_trace) {
+        std::fprintf(stderr, "XDNA_EXECUTION_TRACE scheduler compute_splits entry splits=%d\n", sched->n_splits);
+    }
+#endif
     GGML_ASSERT(sched);
     struct ggml_backend_sched_split * splits = sched->splits;
 
@@ -1739,11 +1864,33 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             }
         }
 
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
+        if (std::getenv("GGML_XDNA_SPLIT_ORDER_TRACE") != nullptr) {
+            const char * first = split->graph.n_nodes > 0 && split->graph.nodes[0] ? split->graph.nodes[0]->name : "";
+            const char * last = split->graph.n_nodes > 0 && split->graph.nodes[split->graph.n_nodes - 1] ? split->graph.nodes[split->graph.n_nodes - 1]->name : "";
+            std::fprintf(stderr, "XDNA_BACKEND_TRACE SPLIT %d BEFORE backend=%s nodes=%d inputs=%d first=%s last=%s\n", split_id, ggml_backend_name(split_backend), split->graph.n_nodes, split->n_inputs, first, last);
+        }
+#endif
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
+        if (std::getenv("GGML_XDNA_FORCE_SPLIT_SYNC") != nullptr) {
+            if (prev_backend_id >= 0) ggml_backend_synchronize(sched->backends[prev_backend_id]);
+            ggml_backend_synchronize(split_backend);
+            if (std::getenv("GGML_XDNA_SPLIT_ORDER_TRACE") != nullptr) std::fprintf(stderr, "XDNA_BACKEND_TRACE FORCE_SYNC split=%d prev=%d\n", split_id, prev_backend_id);
+        }
+#endif
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
+        if (execution_trace) {
+            std::fprintf(stderr, "XDNA_EXECUTION_TRACE scheduler split=%d backend=%s nodes=%d inputs=%d\n", split_id, ggml_backend_name(split_backend), split->graph.n_nodes, split->n_inputs);
+        }
+#endif
         if (!sched->callback_eval) {
             enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph);
             if (ec != GGML_STATUS_SUCCESS) {
                 return ec;
             }
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
+            if (std::getenv("GGML_XDNA_SPLIT_ORDER_TRACE") != nullptr) std::fprintf(stderr, "XDNA_BACKEND_TRACE SPLIT %d AFTER graph_compute status=%d\n", split_id, static_cast<int>(ec));
+#endif
         } else {
             // similar to ggml_backend_compare_graph_backend
             for (int j0 = 0; j0 < split->graph.n_nodes; j0++) {
@@ -1813,6 +1960,16 @@ ggml_backend_sched_t ggml_backend_sched_new(
     sched->debug_realloc = GGML_SCHED_DEBUG_REALLOC ? atoi(GGML_SCHED_DEBUG_REALLOC) : sched->debug_realloc;
 
     sched->n_backends = n_backends;
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
+    if (std::getenv("GGML_XDNA_EXECUTION_TRACE") != nullptr) {
+        for (int i = 0; i < n_backends; ++i) {
+            std::fprintf(stderr, "XDNA_EXECUTION_TRACE backend_order id=%d name=%s buft=%s host=%d\n", i,
+                    ggml_backend_name(backends[i]),
+                    bufts != NULL && bufts[i] != NULL ? ggml_backend_buft_name(bufts[i]) : "default",
+                    bufts != NULL && bufts[i] != NULL && ggml_backend_buft_is_host(bufts[i]) ? 1 : 0);
+        }
+    }
+#endif
     sched->n_copies = parallel ? GGML_SCHED_MAX_COPIES : 1;
 
     // initialize hash table
@@ -1959,7 +2116,19 @@ enum ggml_status ggml_backend_sched_graph_compute(ggml_backend_sched_t sched, st
 }
 
 enum ggml_status ggml_backend_sched_graph_compute_async(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
+    if (std::getenv("GGML_XDNA_EXECUTION_TRACE") != nullptr) {
+        std::fprintf(stderr, "XDNA_EXECUTION_TRACE sched_graph_compute_async entry nodes=%d is_alloc=%d splits=%d\n", ggml_graph_n_nodes(graph), sched->is_alloc ? 1 : 0, sched->n_splits);
+    }
+#endif
     GGML_ASSERT(sched);
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
+    if (std::getenv("GGML_XDNA_SCHED_PROVENANCE_TRACE") != nullptr) {
+        std::fprintf(stderr, "XDNA_SCHEDULER_PROVENANCE compute graph=%p nodes=%d is_alloc=%d split_generation=%llu n_splits=%d\n",
+                (void *) graph, graph->n_nodes, sched->is_alloc ? 1 : 0,
+                static_cast<unsigned long long>(sched->split_generation), sched->n_splits);
+    }
+#endif
     if (!sched->is_reset && !sched->is_alloc) {
         ggml_backend_sched_reset(sched);
     }
@@ -1969,6 +2138,13 @@ enum ggml_status ggml_backend_sched_graph_compute_async(ggml_backend_sched_t sch
             return GGML_STATUS_ALLOC_FAILED;
         }
     }
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
+    if (std::getenv("GGML_XDNA_STOP_AFTER_RUNTIME_SPLIT") != nullptr && sched->is_alloc) {
+        std::fprintf(stderr, "XDNA_BACKEND_ASSIGNMENT diagnostic stop after runtime split_generation=%llu n_splits=%d\n",
+                static_cast<unsigned long long>(sched->split_generation), sched->n_splits);
+        return GGML_STATUS_FAILED;
+    }
+#endif
 
     return ggml_backend_sched_compute_splits(sched);
 }
@@ -1996,6 +2172,17 @@ int ggml_backend_sched_get_n_splits(ggml_backend_sched_t sched) {
     GGML_ASSERT(sched);
     return sched->n_splits;
 }
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
+bool ggml_backend_sched_get_is_alloc(ggml_backend_sched_t sched) {
+    GGML_ASSERT(sched);
+    return sched->is_alloc;
+}
+
+uint64_t ggml_backend_sched_get_split_generation(ggml_backend_sched_t sched) {
+    GGML_ASSERT(sched);
+    return sched->split_generation;
+}
+#endif
 
 int ggml_backend_sched_get_n_copies(ggml_backend_sched_t sched) {
     GGML_ASSERT(sched);

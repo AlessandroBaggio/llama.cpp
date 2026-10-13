@@ -13,6 +13,7 @@
 #include "llama-sampler.h"
 #include "llama.h"
 
+#include <cstdlib>
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
@@ -628,6 +629,35 @@ void llama_context::sched_reserve() {
 
     const uint32_t n_outputs_pp = std::min(n_tokens, cparams.n_outputs_max);
 
+
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS) && GGML_XDNA_BUILD_DIAGNOSTICS
+    auto trace_reserve_phase = [&](const char * phase, uint32_t phase_tokens, uint32_t phase_seqs, uint32_t phase_outputs, ggml_cgraph * phase_graph) {
+        if (std::getenv("GGML_XDNA_SCHED_PROVENANCE_TRACE") == nullptr) {
+            return;
+        }
+        int supported = 0, unsupported = 0, rhs1 = 0, rhs64 = 0, rhs_other = 0;
+        ggml_backend_t xdna = nullptr;
+        for (ggml_backend_t backend : backend_ptrs) {
+            if (std::strstr(ggml_backend_name(backend), "XDNA") != nullptr) { xdna = backend; break; }
+        }
+        if (xdna != nullptr) {
+            for (int i = 0; i < ggml_graph_n_nodes(phase_graph); ++i) {
+                const ggml_tensor * node = ggml_graph_node(phase_graph, i);
+                if (node->op != GGML_OP_MUL_MAT || node->src[0] == nullptr || node->src[0]->type != GGML_TYPE_Q4_K ||
+                        node->src[0]->ne[0] != 2560 || node->src[1] == nullptr) continue;
+                const int64_t rhs = node->src[1]->ne[1];
+                if (rhs == 1) { ++rhs1; } else if (rhs == 64) { ++rhs64; } else { ++rhs_other; }
+                if (ggml_backend_supports_op(xdna, node)) { ++supported; } else { ++unsupported; }
+            }
+        }
+        std::fprintf(stderr, "XDNA_SCHEDULER_PROVENANCE phase=%s n_tokens=%d n_seqs=%d n_outputs=%d graph=%p nodes=%d is_alloc=%d n_splits=%d XDNA_supported=%d XDNA_unsupported=%d rhs1=%d rhs64=%d rhs_other=%d\n",
+                phase, (int) phase_tokens, (int) phase_seqs, (int) phase_outputs, (void *) phase_graph,
+                ggml_graph_n_nodes(phase_graph), ggml_backend_sched_get_is_alloc(sched.get()) ? 1 : 0,
+                ggml_backend_sched_get_n_splits(sched.get()), supported, unsupported, rhs1, rhs64, rhs_other);
+        std::fprintf(stderr, "XDNA_SCHEDULER_PROVENANCE phase=%s split_generation=%llu\n", phase,
+                static_cast<unsigned long long>(ggml_backend_sched_get_split_generation(sched.get())));
+    };
+#endif
     // reserve pp (prompt processing) graph first so that buffers are only allocated once
     {
         auto * gf = graph_reserve(n_tokens, n_seqs, n_outputs_pp, mctx.get(),
@@ -646,6 +676,9 @@ void llama_context::sched_reserve() {
 
         n_splits_pp = ggml_backend_sched_get_n_splits(sched.get());
         n_nodes_pp  = ggml_graph_n_nodes(gf);
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS) && GGML_XDNA_BUILD_DIAGNOSTICS
+        trace_reserve_phase("PROMPT_PROCESSING", n_tokens, n_seqs, n_outputs_pp, gf);
+#endif
     }
 
     // reserve with tg (token generation) graph to get the number of splits and nodes
@@ -657,6 +690,9 @@ void llama_context::sched_reserve() {
 
         n_splits_tg = ggml_backend_sched_get_n_splits(sched.get());
         n_nodes_tg  = ggml_graph_n_nodes(gf);
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS) && GGML_XDNA_BUILD_DIAGNOSTICS
+        trace_reserve_phase("TG", n_seqs, n_seqs, n_seqs, gf);
+#endif
     }
 
     // reserve again with pp graph to avoid ggml-alloc reallocations during inference
@@ -669,6 +705,9 @@ void llama_context::sched_reserve() {
         if (!gf) {
             throw std::runtime_error("failed to allocate compute pp buffers");
         }
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS) && GGML_XDNA_BUILD_DIAGNOSTICS
+        trace_reserve_phase("PP2", n_tokens, n_seqs, n_outputs_pp, gf);
+#endif
     }
 
     for (size_t i = 0; i < backend_ptrs.size(); ++i) {
@@ -1633,6 +1672,11 @@ static bool needs_raw_logits(const llama_ubatch & ubatch, const std::map<llama_s
 }
 
 int llama_context::decode(const llama_batch & batch_inp) {
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS) && GGML_XDNA_BUILD_DIAGNOSTICS
+    if (std::getenv("GGML_XDNA_EXECUTION_TRACE") != nullptr) {
+        LLAMA_LOG_INFO("XDNA_EXECUTION_TRACE decode entry: batch_tokens=%d\n", batch_inp.n_tokens);
+    }
+#endif
     // MTP hook batches carry both token (next-token id) and embd (h_nextn row),
     // so accept either present rather than requiring exactly one.
     GGML_ASSERT(batch_inp.token || batch_inp.embd);
@@ -1810,6 +1854,13 @@ int llama_context::decode(const llama_batch & batch_inp) {
             // needs to happen before the graph is built
             n_outputs = n_outputs_new;
         }
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS) && GGML_XDNA_BUILD_DIAGNOSTICS
+            if (std::getenv("GGML_XDNA_RUNTIME_BATCH_TRACE") != nullptr) {
+                LLAMA_LOG_INFO("XDNA_RUNTIME_BATCH ubatch index=%lld n_tokens=%u n_seq_tokens=%u n_seqs=%u n_seqs_unq=%u equal_seqs=%d n_outputs=%d n_outputs_all=%u n_tokens_all=%u output_all=%d\n",
+                        (long long) n_tokens_prev, ubatch.n_tokens, ubatch.n_seq_tokens, ubatch.n_seqs, ubatch.n_seqs_unq,
+                        ubatch.equal_seqs() ? 1 : 0, n_outputs, n_outputs_all, n_tokens_all, output_all ? 1 : 0);
+            }
+#endif
 
         ggml_status status;
 
@@ -2475,6 +2526,11 @@ llm_graph_params llama_context::graph_params(
 ggml_status llama_context::graph_compute(
             ggml_cgraph * gf,
                    bool   batched) {
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS) && GGML_XDNA_BUILD_DIAGNOSTICS
+    if (std::getenv("GGML_XDNA_EXECUTION_TRACE") != nullptr) {
+        LLAMA_LOG_INFO("XDNA_EXECUTION_TRACE llama graph_compute entry: nodes=%d batched=%d\n", ggml_graph_n_nodes(gf), batched ? 1 : 0);
+    }
+#endif
     int n_threads        = batched ? cparams.n_threads_batch : cparams.n_threads;
     ggml_threadpool_t tp = batched ? threadpool_batch        : threadpool;
 
@@ -2497,6 +2553,11 @@ ggml_status llama_context::graph_compute(
     }
 
     // fprintf(stderr, "splits: %d\n", ggml_backend_sched_get_n_splits(sched));
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS) && GGML_XDNA_BUILD_DIAGNOSTICS
+    if (std::getenv("GGML_XDNA_EXECUTION_TRACE") != nullptr) {
+        LLAMA_LOG_INFO("XDNA_EXECUTION_TRACE llama graph_compute result: status=%d\n", status);
+    }
+#endif
 
     return status;
 }
@@ -4129,10 +4190,30 @@ int32_t llama_encode(
 int32_t llama_decode(
         llama_context * ctx,
           llama_batch   batch) {
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS) && GGML_XDNA_BUILD_DIAGNOSTICS
+    if (std::getenv("GGML_XDNA_EXECUTION_TRACE") != nullptr) {
+        LLAMA_LOG_INFO("XDNA_EXECUTION_TRACE llama_decode entry: batch_tokens=%d\n", batch.n_tokens);
+    }
+    if (std::getenv("GGML_XDNA_RUNTIME_BATCH_TRACE") != nullptr) {
+        LLAMA_LOG_INFO("XDNA_RUNTIME_BATCH llama_decode batch n_tokens=%d\n", batch.n_tokens);
+        for (int32_t i = 0; i < batch.n_tokens; ++i) {
+            const int32_t n_seq = batch.n_seq_id ? batch.n_seq_id[i] : 1;
+            LLAMA_LOG_INFO("XDNA_RUNTIME_BATCH batch[%d] token=%d pos=%d n_seq_id=%d logits=%d seq0=%d\n", i,
+                    batch.token ? batch.token[i] : -1, batch.pos ? batch.pos[i] : -1, n_seq,
+                    batch.logits ? batch.logits[i] : -1,
+                    batch.seq_id && batch.seq_id[i] && n_seq > 0 ? batch.seq_id[i][0] : 0);
+        }
+    }
+#endif
     const int ret = ctx->decode(batch);
     if (ret != 0 && ret != 1) {
         LLAMA_LOG_ERROR("%s: failed to decode, ret = %d\n", __func__, ret);
     }
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS) && GGML_XDNA_BUILD_DIAGNOSTICS
+    if (std::getenv("GGML_XDNA_EXECUTION_TRACE") != nullptr) {
+        LLAMA_LOG_INFO("XDNA_EXECUTION_TRACE llama_decode return: status=%d\n", ret);
+    }
+#endif
 
     return ret;
 }

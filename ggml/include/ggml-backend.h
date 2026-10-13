@@ -328,6 +328,11 @@ extern "C" {
 
     // Get the number of splits of the last graph
     GGML_API int                  ggml_backend_sched_get_n_splits(ggml_backend_sched_t sched);
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
+    // Diagnostic-only scheduler state inspection.
+    GGML_API bool                 ggml_backend_sched_get_is_alloc(ggml_backend_sched_t sched);
+    GGML_API uint64_t             ggml_backend_sched_get_split_generation(ggml_backend_sched_t sched);
+#endif
     GGML_API int                  ggml_backend_sched_get_n_copies(ggml_backend_sched_t sched);
 
     GGML_API ggml_backend_buffer_type_t ggml_backend_sched_get_buffer_type(ggml_backend_sched_t sched, ggml_backend_t backend);

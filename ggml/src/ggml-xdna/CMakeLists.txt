@@ -67,3 +67,60 @@ endif()
 message(STATUS "XDNA XRT_ROOT: ${XRT_ROOT}")
 message(STATUS "XDNA XRT include: ${XRT_INCLUDE_DIR}")
 message(STATUS "XDNA XRT library: ${XRT_COREUTIL_LIB}")
+
+option(GGML_XDNA_BUILD_DIAGNOSTICS "Build XDNA replay and capture diagnostics" OFF)
+if(GGML_XDNA_BUILD_DIAGNOSTICS)
+    if(GGML_BACKEND_DL)
+        message(FATAL_ERROR "GGML_XDNA_BUILD_DIAGNOSTICS requires static XDNA backend linkage for its private replay entrypoint")
+    endif()
+    target_sources(ggml-xdna PRIVATE ggml-xdna-diagnostics.cpp)
+    target_sources(ggml-xdna PRIVATE ggml-xdna-causal-payload-capture.cpp)
+    target_compile_definitions(ggml-xdna PRIVATE GGML_XDNA_BUILD_DIAGNOSTICS)
+    target_compile_definitions(ggml-base PRIVATE GGML_XDNA_BUILD_DIAGNOSTICS)
+    add_executable(xdna-capture-session-selftest
+        ../../../tools/xdna-capture-session-selftest.cpp
+        ggml-xdna-sha256.c)
+    target_compile_features(xdna-capture-session-selftest PRIVATE cxx_std_17)
+    target_include_directories(ggml-xdna PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_executable(xdna-causal-payload-capture-selftest
+        ../../../tools/xdna-causal-payload-capture-selftest.cpp
+        ggml-xdna-causal-payload-capture.cpp
+        ggml-xdna-sha256.c)
+    target_compile_features(xdna-causal-payload-capture-selftest PRIVATE cxx_std_17)
+    target_include_directories(xdna-causal-payload-capture-selftest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../../vendor)
+
+    add_executable(xdna-capture-replay
+        ../../../tools/xdna-capture-replay.cpp
+        ggml-xdna-sha256.c)
+    target_compile_features(xdna-capture-replay PRIVATE cxx_std_17)
+    target_include_directories(xdna-capture-replay PRIVATE
+        ../../include
+        ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(xdna-capture-replay PRIVATE ggml-base ggml ggml-xdna)
+    add_library(xdna-causal-runtime SHARED
+        ../../../tools/xdna-causal-runtime.cpp)
+    target_compile_features(xdna-causal-runtime PRIVATE cxx_std_17)
+    target_compile_definitions(xdna-causal-runtime PRIVATE GGML_XDNA_BUILD_DIAGNOSTICS)
+    target_include_directories(xdna-causal-runtime PRIVATE
+        ../../include
+        ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(xdna-causal-runtime PRIVATE ggml-base ggml ggml-xdna)
+
+    add_executable(xdna-causal-executor
+        ../../../tools/xdna-causal-executor.cpp
+        ggml-xdna-sha256.c)
+    target_compile_features(xdna-causal-executor PRIVATE cxx_std_17)
+    target_include_directories(xdna-causal-executor PRIVATE
+        ../../include
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../../vendor
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../../tools)
+
+    add_executable(xdna-causal-execution-gate-selftest
+        ../../../tools/xdna-causal-execution-gate-selftest.cpp)
+    target_compile_features(xdna-causal-execution-gate-selftest PRIVATE cxx_std_17)
+    target_include_directories(xdna-causal-execution-gate-selftest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+endif()

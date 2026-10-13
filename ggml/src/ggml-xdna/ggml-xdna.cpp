@@ -133,7 +133,7 @@ static uint64_t ggml_backend_xdna_next_registration_id = 1;
 
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
 static void ggml_backend_xdna_teardown_marker(const char * event) {
-    std::fprintf(stderr, "GN1_TEARDOWN event=%s\n", event);
+    std::fprintf(stderr, "XDNA_CAUSAL_TEARDOWN event=%s\n", event);
     std::fflush(stderr);
 }
 
@@ -244,7 +244,7 @@ static bool ggml_backend_xdna_diag_report_module(const char * stage, const wchar
     const HMODULE module = GetModuleHandleW(name);
     const std::string module_name = ggml_backend_xdna_diag_utf8(name);
     if (module == nullptr) {
-        std::fprintf(stderr, "A7G0_XRT_MODULE stage=%s name=%s loaded=NO\n", stage, module_name.c_str());
+        std::fprintf(stderr, "XDNA_PREFLIGHT_XRT_MODULE stage=%s name=%s loaded=NO\n", stage, module_name.c_str());
         return false;
     }
     const std::wstring path = ggml_backend_xdna_diag_module_path(module);
@@ -252,13 +252,13 @@ static bool ggml_backend_xdna_diag_report_module(const char * stage, const wchar
     char sha256[65] = "UNAVAILABLE";
     const bool hashed = !path.empty() && ggml_backend_xdna_diag_hash_path(path, sha256);
     const std::string version = path.empty() ? "UNAVAILABLE" : ggml_backend_xdna_diag_file_version(path);
-    std::fprintf(stderr, "A7G0_XRT_MODULE stage=%s name=%s loaded=YES path=\"%s\" sha256=%s file_version=%s\n",
+    std::fprintf(stderr, "XDNA_PREFLIGHT_XRT_MODULE stage=%s name=%s loaded=YES path=\"%s\" sha256=%s file_version=%s\n",
         stage, module_name.c_str(), path_utf8.c_str(), sha256, version.c_str());
     return !path.empty() && hashed && version != "UNAVAILABLE";
 }
 
 
-static std::wstring ggml_backend_xdna_a7g3_env_wide(const wchar_t * name) {
+static std::wstring ggml_backend_xdna_identity_env_wide(const wchar_t * name) {
     const DWORD capacity = GetEnvironmentVariableW(name, nullptr, 0);
     if (capacity == 0) return {};
     std::vector<wchar_t> buffer(capacity);
@@ -267,7 +267,7 @@ static std::wstring ggml_backend_xdna_a7g3_env_wide(const wchar_t * name) {
     return std::wstring(buffer.data(), length);
 }
 
-static std::wstring ggml_backend_xdna_a7g3_canonical_path(const std::wstring & input) {
+static std::wstring ggml_backend_xdna_identity_canonical_path(const std::wstring & input) {
     std::wstring path = input;
     if (path.size() >= 2 && path.front() == L'"' && path.back() == L'"') {
         path = path.substr(1, path.size() - 2);
@@ -287,7 +287,7 @@ static std::wstring ggml_backend_xdna_a7g3_canonical_path(const std::wstring & i
         ? std::wstring(buffer.data(), length) : std::wstring();
 }
 
-static std::wstring ggml_backend_xdna_a7g3_path_text(std::wstring path) {
+static std::wstring ggml_backend_xdna_identity_path_text(std::wstring path) {
     if (path.size() >= 2 && path.front() == L'"' && path.back() == L'"') {
         path = path.substr(1, path.size() - 2);
     }
@@ -297,35 +297,35 @@ static std::wstring ggml_backend_xdna_a7g3_path_text(std::wstring path) {
     return path;
 }
 
-static bool ggml_backend_xdna_a7g3_same_path(const std::wstring & left, const std::wstring & right) {
+static bool ggml_backend_xdna_identity_same_path(const std::wstring & left, const std::wstring & right) {
     return !left.empty() && !right.empty() &&
         CompareStringOrdinal(left.c_str(), static_cast<int>(left.size()),
             right.c_str(), static_cast<int>(right.size()), TRUE) == CSTR_EQUAL;
 }
 
-static bool ggml_backend_xdna_a7g3_path_contains(
+static bool ggml_backend_xdna_identity_path_contains(
         const std::wstring & path_list, const std::wstring & required) {
-    const std::wstring wanted = ggml_backend_xdna_a7g3_path_text(required);
+    const std::wstring wanted = ggml_backend_xdna_identity_path_text(required);
     size_t begin = 0;
     while (begin <= path_list.size()) {
         const size_t end = path_list.find(L';', begin);
-        const std::wstring entry = ggml_backend_xdna_a7g3_path_text(
+        const std::wstring entry = ggml_backend_xdna_identity_path_text(
             path_list.substr(begin, end == std::wstring::npos ? end : end - begin));
-        if (ggml_backend_xdna_a7g3_same_path(entry, wanted)) return true;
+        if (ggml_backend_xdna_identity_same_path(entry, wanted)) return true;
         if (end == std::wstring::npos) break;
         begin = end + 1;
     }
     return false;
 }
 
-static bool ggml_backend_xdna_a7g3_directory_exists(const std::wstring & path) {
+static bool ggml_backend_xdna_identity_directory_exists(const std::wstring & path) {
     if (path.empty()) return false;
     const DWORD attributes = GetFileAttributesW(path.c_str());
     return attributes != INVALID_FILE_ATTRIBUTES &&
         (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
-static bool ggml_backend_xdna_a7g3_valid_sha256(const char * value) {
+static bool ggml_backend_xdna_identity_valid_sha256(const char * value) {
     if (value == nullptr || std::strlen(value) != 64) return false;
     for (size_t i = 0; i < 64; ++i) {
         const char c = value[i];
@@ -335,8 +335,8 @@ static bool ggml_backend_xdna_a7g3_valid_sha256(const char * value) {
     return true;
 }
 
-static bool ggml_backend_xdna_a7g3_same_sha256(const char * expected, const char * observed) {
-    if (!ggml_backend_xdna_a7g3_valid_sha256(expected) || observed == nullptr) return false;
+static bool ggml_backend_xdna_identity_same_sha256(const char * expected, const char * observed) {
+    if (!ggml_backend_xdna_identity_valid_sha256(expected) || observed == nullptr) return false;
     for (size_t i = 0; i < 64; ++i) {
         char a = expected[i];
         char b = observed[i];
@@ -347,7 +347,7 @@ static bool ggml_backend_xdna_a7g3_same_sha256(const char * expected, const char
     return true;
 }
 
-static bool ggml_backend_xdna_a7g3_verify_module(
+static bool ggml_backend_xdna_identity_verify_module(
         const char * marker, const wchar_t * module_name,
         const std::wstring & expected_path_raw, const char * expected_sha,
         std::wstring * observed_path_out) {
@@ -355,7 +355,7 @@ static bool ggml_backend_xdna_a7g3_verify_module(
     const HMODULE module = GetModuleHandleW(module_name);
     const std::string name = ggml_backend_xdna_diag_utf8(module_name);
     const std::wstring expected_path =
-        ggml_backend_xdna_a7g3_canonical_path(expected_path_raw);
+        ggml_backend_xdna_identity_canonical_path(expected_path_raw);
     std::wstring observed_path;
     char observed_sha[65] = "UNAVAILABLE";
     bool hashed = false;
@@ -364,7 +364,7 @@ static bool ggml_backend_xdna_a7g3_verify_module(
         const DWORD length = GetModuleFileNameW(module, buffer.data(),
             static_cast<DWORD>(buffer.size()));
         if (length > 0 && length < buffer.size()) {
-            observed_path = ggml_backend_xdna_a7g3_canonical_path(
+            observed_path = ggml_backend_xdna_identity_canonical_path(
                 std::wstring(buffer.data(), length));
         }
         hashed = !observed_path.empty() &&
@@ -372,9 +372,9 @@ static bool ggml_backend_xdna_a7g3_verify_module(
     }
     if (observed_path_out != nullptr) *observed_path_out = observed_path;
 
-    const bool path_match = ggml_backend_xdna_a7g3_same_path(expected_path, observed_path);
-    const bool sha_valid = ggml_backend_xdna_a7g3_valid_sha256(expected_sha);
-    const bool sha_match = hashed && ggml_backend_xdna_a7g3_same_sha256(expected_sha, observed_sha);
+    const bool path_match = ggml_backend_xdna_identity_same_path(expected_path, observed_path);
+    const bool sha_valid = ggml_backend_xdna_identity_valid_sha256(expected_sha);
+    const bool sha_match = hashed && ggml_backend_xdna_identity_same_sha256(expected_sha, observed_sha);
     const bool ok = module != nullptr && !expected_path_raw.empty() && path_match && sha_valid && sha_match;
     const char * reason = "verified";
     if (expected_path_raw.empty()) reason = "expected_path_missing";
@@ -402,31 +402,31 @@ static bool ggml_backend_xdna_a7g3_verify_module(
     return ok;
 }
 
-static bool ggml_backend_xdna_a7g3_verify_control_identity() {
+static bool ggml_backend_xdna_identity_verify_control_identity() {
     const DWORD pid = GetCurrentProcessId();
-    std::fprintf(stderr, "A7G3_IDENTITY_GATE_START pid=%lu stage=AFTER_DEVICE_INIT\n",
+    std::fprintf(stderr, "XDNA_IDENTITY_IDENTITY_GATE_START pid=%lu stage=AFTER_DEVICE_INIT\n",
         static_cast<unsigned long>(pid));
 
-    const std::wstring system_root = ggml_backend_xdna_a7g3_env_wide(L"SystemRoot");
-    const std::wstring path_list = ggml_backend_xdna_a7g3_env_wide(L"PATH");
-    const std::wstring backend_path = ggml_backend_xdna_a7g3_env_wide(L"GGML_BACKEND_PATH");
-    const std::wstring coreutil_path = ggml_backend_xdna_a7g3_env_wide(
+    const std::wstring system_root = ggml_backend_xdna_identity_env_wide(L"SystemRoot");
+    const std::wstring path_list = ggml_backend_xdna_identity_env_wide(L"PATH");
+    const std::wstring backend_path = ggml_backend_xdna_identity_env_wide(L"GGML_BACKEND_PATH");
+    const std::wstring coreutil_path = ggml_backend_xdna_identity_env_wide(
         L"GGML_XDNA_DIAG_EXPECT_XRT_COREUTIL_PATH");
-    const std::wstring core_path = ggml_backend_xdna_a7g3_env_wide(
+    const std::wstring core_path = ggml_backend_xdna_identity_env_wide(
         L"GGML_XDNA_DIAG_EXPECT_XRT_CORE_PATH");
     const char * coreutil_sha = std::getenv("GGML_XDNA_DIAG_EXPECT_XRT_COREUTIL_SHA256");
     const char * core_sha = std::getenv("GGML_XDNA_DIAG_EXPECT_XRT_CORE_SHA256");
     const char * plugin_sha = std::getenv("GGML_XDNA_DIAG_EXPECT_PLUGIN_SHA256");
 
     std::wstring observed_plugin_path;
-    const bool coreutil_ok = ggml_backend_xdna_a7g3_verify_module(
-        "A7G3_XRT_MODULE_IDENTITY", L"xrt_coreutil.dll", coreutil_path,
+    const bool coreutil_ok = ggml_backend_xdna_identity_verify_module(
+        "XDNA_IDENTITY_XRT_MODULE_IDENTITY", L"xrt_coreutil.dll", coreutil_path,
         coreutil_sha, nullptr);
-    const bool core_ok = ggml_backend_xdna_a7g3_verify_module(
-        "A7G3_XRT_MODULE_IDENTITY", L"xrt_core.dll", core_path,
+    const bool core_ok = ggml_backend_xdna_identity_verify_module(
+        "XDNA_IDENTITY_XRT_MODULE_IDENTITY", L"xrt_core.dll", core_path,
         core_sha, nullptr);
-    const bool plugin_ok = ggml_backend_xdna_a7g3_verify_module(
-        "A7G3_PLUGIN_IDENTITY", L"ggml-xdna.dll", backend_path,
+    const bool plugin_ok = ggml_backend_xdna_identity_verify_module(
+        "XDNA_IDENTITY_PLUGIN_IDENTITY", L"ggml-xdna.dll", backend_path,
         plugin_sha, &observed_plugin_path);
 
     std::wstring system32 = system_root;
@@ -441,17 +441,17 @@ static bool ggml_backend_xdna_a7g3_verify_control_identity() {
         windows_directory_length < windows_directory_buffer.size()
         ? std::wstring(windows_directory_buffer.data(), windows_directory_length)
         : std::wstring();
-    const bool system_root_valid = ggml_backend_xdna_a7g3_same_path(
-        ggml_backend_xdna_a7g3_path_text(system_root),
-        ggml_backend_xdna_a7g3_path_text(windows_directory));
+    const bool system_root_valid = ggml_backend_xdna_identity_same_path(
+        ggml_backend_xdna_identity_path_text(system_root),
+        ggml_backend_xdna_identity_path_text(windows_directory));
     const size_t plugin_slash = observed_plugin_path.find_last_of(L"\\/");
     const std::wstring plugin_directory = plugin_slash == std::wstring::npos
         ? std::wstring() : observed_plugin_path.substr(0, plugin_slash);
-    const bool system32_exists = ggml_backend_xdna_a7g3_directory_exists(system32);
-    const bool systemroot_in_path = ggml_backend_xdna_a7g3_path_contains(path_list, system_root);
-    const bool system32_in_path = ggml_backend_xdna_a7g3_path_contains(path_list, system32);
+    const bool system32_exists = ggml_backend_xdna_identity_directory_exists(system32);
+    const bool systemroot_in_path = ggml_backend_xdna_identity_path_contains(path_list, system_root);
+    const bool system32_in_path = ggml_backend_xdna_identity_path_contains(path_list, system32);
     const bool plugin_directory_in_path =
-        ggml_backend_xdna_a7g3_path_contains(path_list, plugin_directory);
+        ggml_backend_xdna_identity_path_contains(path_list, plugin_directory);
     const bool environment_ok = system_root_valid && system32_exists &&
         systemroot_in_path && system32_in_path && plugin_directory_in_path;
     const bool stop_gate_unset =
@@ -471,17 +471,17 @@ static bool ggml_backend_xdna_a7g3_verify_control_identity() {
     if (ok) reason = "all_identities_verified";
     else if (!reason.empty()) reason.pop_back();
     std::fprintf(stderr,
-        "A7G3_CONTROL_SUBMISSION_ALLOWED=%s pid=%lu stage=AFTER_DEVICE_INIT reason=%s\n",
+        "XDNA_IDENTITY_CONTROL_SUBMISSION_ALLOWED=%s pid=%lu stage=AFTER_DEVICE_INIT reason=%s\n",
         ok ? "YES" : "NO", static_cast<unsigned long>(pid), reason.c_str());
     std::fflush(stderr);
     return ok;
 }
 
-static void ggml_backend_xdna_a7g3_log_device_init_failure() {
+static void ggml_backend_xdna_identity_log_device_init_failure() {
     const DWORD pid = GetCurrentProcessId();
     std::fprintf(stderr,
-        "A7G3_IDENTITY_GATE_START pid=%lu stage=DEVICE_INIT_FAILED\n"
-        "A7G3_CONTROL_SUBMISSION_ALLOWED=NO pid=%lu stage=DEVICE_INIT_FAILED reason=xrt_device_open_failed\n",
+        "XDNA_IDENTITY_IDENTITY_GATE_START pid=%lu stage=DEVICE_INIT_FAILED\n"
+        "XDNA_IDENTITY_CONTROL_SUBMISSION_ALLOWED=NO pid=%lu stage=DEVICE_INIT_FAILED reason=xrt_device_open_failed\n",
         static_cast<unsigned long>(pid), static_cast<unsigned long>(pid));
     std::fflush(stderr);
 }
@@ -493,21 +493,21 @@ static ggml_backend_xdna_context ggml_backend_xdna_create_context() {
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS) && defined(_WIN32)
     const char * preflight_value = std::getenv("GGML_XDNA_DIAG_STOP_AFTER_XRT_MODULE_PREFLIGHT");
     const bool preflight_requested = preflight_value != nullptr;
-    const char * a7f_q4_value = std::getenv("GGML_XDNA_DIAG_Q4_ORD7_AT_ORD8");
-    const bool a7g3_control_requested = a7f_q4_value != nullptr && std::strcmp(a7f_q4_value, "1") == 0;
-    if (a7g3_control_requested && preflight_requested) {
-        ctx.a7g3_identity_gate_failed = true;
+    const char * q4_control_value = std::getenv("GGML_XDNA_DIAG_Q4_ORD7_AT_ORD8");
+    const bool identity_control_requested = q4_control_value != nullptr && std::strcmp(q4_control_value, "1") == 0;
+    if (identity_control_requested && preflight_requested) {
+        ctx.identity_gate_failed = true;
         const unsigned long pid = static_cast<unsigned long>(GetCurrentProcessId());
-        std::fprintf(stderr, "A7G3_IDENTITY_GATE_START pid=%lu stage=STOP_GATE_CONFLICT\n", pid);
-        std::fprintf(stderr, "A7G3_CONTROL_SUBMISSION_ALLOWED=NO pid=%lu stage=STOP_GATE_CONFLICT reason=stop_gate_must_be_unset\n", pid);
+        std::fprintf(stderr, "XDNA_IDENTITY_IDENTITY_GATE_START pid=%lu stage=STOP_GATE_CONFLICT\n", pid);
+        std::fprintf(stderr, "XDNA_IDENTITY_CONTROL_SUBMISSION_ALLOWED=NO pid=%lu stage=STOP_GATE_CONFLICT reason=stop_gate_must_be_unset\n", pid);
         std::fflush(stderr);
     }
     if (preflight_requested) {
         ctx.stop_after_xrt_module_preflight = true;
-        std::fprintf(stderr, "A7G0_PREFLIGHT_START pid=%lu gate=%s submission_allowed=NO\n",
+        std::fprintf(stderr, "XDNA_PREFLIGHT_PREFLIGHT_START pid=%lu gate=%s submission_allowed=NO\n",
             static_cast<unsigned long>(GetCurrentProcessId()), preflight_value);
         if (std::strcmp(preflight_value, "1") != 0) {
-            std::fprintf(stderr, "A7G0_PREFLIGHT_RESULT status=ABORT reason=invalid_gate_value\n");
+            std::fprintf(stderr, "XDNA_PREFLIGHT_PREFLIGHT_RESULT status=ABORT reason=invalid_gate_value\n");
             return ctx;
         }
         ggml_backend_xdna_diag_report_module("BEFORE_DEVICE_INIT", L"ggml-xdna.dll");
@@ -527,13 +527,13 @@ static ggml_backend_xdna_context ggml_backend_xdna_create_context() {
             ggml_backend_xdna_diag_report_module("DEVICE_INIT_FAILED", L"ggml-xdna.dll");
             ggml_backend_xdna_diag_report_module("DEVICE_INIT_FAILED", L"xrt_coreutil.dll");
             ggml_backend_xdna_diag_report_module("DEVICE_INIT_FAILED", L"xrt_core.dll");
-            std::fprintf(stderr, "A7G0_PREFLIGHT_RESULT status=ABORT reason=xrt_device_open_failed\n");
+            std::fprintf(stderr, "XDNA_PREFLIGHT_PREFLIGHT_RESULT status=ABORT reason=xrt_device_open_failed\n");
         }
 #endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS) && defined(_WIN32)
-        if (a7g3_control_requested && !preflight_requested) {
-            ctx.a7g3_identity_gate_failed = true;
-            ggml_backend_xdna_a7g3_log_device_init_failure();
+        if (identity_control_requested && !preflight_requested) {
+            ctx.identity_gate_failed = true;
+            ggml_backend_xdna_identity_log_device_init_failure();
         }
 #endif
         return ctx;
@@ -546,13 +546,13 @@ static ggml_backend_xdna_context ggml_backend_xdna_create_context() {
             ggml_backend_xdna_diag_report_module("DEVICE_INIT_FAILED", L"ggml-xdna.dll");
             ggml_backend_xdna_diag_report_module("DEVICE_INIT_FAILED", L"xrt_coreutil.dll");
             ggml_backend_xdna_diag_report_module("DEVICE_INIT_FAILED", L"xrt_core.dll");
-            std::fprintf(stderr, "A7G0_PREFLIGHT_RESULT status=ABORT reason=xrt_device_open_failed\n");
+            std::fprintf(stderr, "XDNA_PREFLIGHT_PREFLIGHT_RESULT status=ABORT reason=xrt_device_open_failed\n");
         }
 #endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS) && defined(_WIN32)
-        if (a7g3_control_requested && !preflight_requested) {
-            ctx.a7g3_identity_gate_failed = true;
-            ggml_backend_xdna_a7g3_log_device_init_failure();
+        if (identity_control_requested && !preflight_requested) {
+            ctx.identity_gate_failed = true;
+            ggml_backend_xdna_identity_log_device_init_failure();
         }
 #endif
         return ctx;
@@ -585,19 +585,19 @@ static ggml_backend_xdna_context ggml_backend_xdna_create_context() {
 
 
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS) && defined(_WIN32)
-    if (a7g3_control_requested && !preflight_requested) {
+    if (identity_control_requested && !preflight_requested) {
         try {
-            ctx.a7g3_identity_gate_failed =
-                !ggml_backend_xdna_a7g3_verify_control_identity();
+            ctx.identity_gate_failed =
+                !ggml_backend_xdna_identity_verify_control_identity();
         } catch (const std::exception & e) {
-            ctx.a7g3_identity_gate_failed = true;
+            ctx.identity_gate_failed = true;
             const unsigned long pid = static_cast<unsigned long>(GetCurrentProcessId());
-            std::fprintf(stderr, "A7G3_CONTROL_SUBMISSION_ALLOWED=NO pid=%lu stage=AFTER_DEVICE_INIT reason=identity_verifier_exception detail=%s\n", pid, e.what());
+            std::fprintf(stderr, "XDNA_IDENTITY_CONTROL_SUBMISSION_ALLOWED=NO pid=%lu stage=AFTER_DEVICE_INIT reason=identity_verifier_exception detail=%s\n", pid, e.what());
             std::fflush(stderr);
         } catch (...) {
-            ctx.a7g3_identity_gate_failed = true;
+            ctx.identity_gate_failed = true;
             const unsigned long pid = static_cast<unsigned long>(GetCurrentProcessId());
-            std::fprintf(stderr, "A7G3_CONTROL_SUBMISSION_ALLOWED=NO pid=%lu stage=AFTER_DEVICE_INIT reason=identity_verifier_unknown_exception\n", pid);
+            std::fprintf(stderr, "XDNA_IDENTITY_CONTROL_SUBMISSION_ALLOWED=NO pid=%lu stage=AFTER_DEVICE_INIT reason=identity_verifier_unknown_exception\n", pid);
             std::fflush(stderr);
         }
     }
@@ -608,7 +608,7 @@ static ggml_backend_xdna_context ggml_backend_xdna_create_context() {
         const bool plugin = ggml_backend_xdna_diag_report_module("AFTER_DEVICE_INIT", L"ggml-xdna.dll");
         const bool coreutil = ggml_backend_xdna_diag_report_module("AFTER_DEVICE_INIT", L"xrt_coreutil.dll");
         const bool core = ggml_backend_xdna_diag_report_module("AFTER_DEVICE_INIT", L"xrt_core.dll");
-        std::fprintf(stderr, "A7G0_PREFLIGHT_RESULT status=%s xrt_device_open=YES xrt_coreutil_identity=%s xrt_core_identity=%s\n",
+        std::fprintf(stderr, "XDNA_PREFLIGHT_PREFLIGHT_RESULT status=%s xrt_device_open=YES xrt_coreutil_identity=%s xrt_core_identity=%s\n",
             plugin && coreutil && core ? "READY" : "IDENTITY_INCOMPLETE",
             coreutil ? "VERIFIED" : "UNVERIFIED", core ? "VERIFIED" : "UNVERIFIED");
     }
@@ -674,7 +674,7 @@ static void ggml_backend_xdna_device_get_props(
     props->caps         = {};
 }
 
-// LLAMA-XDNA-NPU1-INTEGRATION-A1 forward declarations for the env-gated
+// NPU1 integration forward declarations for the env-gated
 // controlled W2IN block invocation (the definition follows the SHA-256
 // helpers, so the compile order stays unchanged for everything else).
 void ggml_backend_xdna_format_sha256(
@@ -747,7 +747,7 @@ static bool ggml_backend_xdna_parse_init_params(
         return true;
     }
 
-    // Dedicated W2IN block profile (LLAMA-XDNA-W2IN-PROFILE-A1).
+    // Dedicated W2IN block profile (W2IN block profile).
     // Bound to the proven npu1/AIE2 package by the fingerprint tables above;
     // the XCLBIN path is always explicit so the profile can never silently
     // fall back to another package.
@@ -816,7 +816,7 @@ static void ggml_backend_xdna_xrt_context_trace(
     }
     const auto * device_context = ctx != nullptr ? ctx->device_context : nullptr;
     std::fprintf(stderr,
-        "XRTQ1 backend_id=%llu shape=%s stage=%s operation=%s result=%s device_index=0 device=%p context_count=%zu registrations=%zu xclbin=%p path=%s sha256=%s xclbin_uuid=%s registered_uuid=%s hw_context=%p kernel=%p error_code=%s message=%s\n",
+        "XDNA_XRT_CONTEXT backend_id=%llu shape=%s stage=%s operation=%s result=%s device_index=0 device=%p context_count=%zu registrations=%zu xclbin=%p path=%s sha256=%s xclbin_uuid=%s registered_uuid=%s hw_context=%p kernel=%p error_code=%s message=%s\n",
         static_cast<unsigned long long>(ctx != nullptr ? ctx->backend_instance_id : 0),
         shape != nullptr ? shape : "UNKNOWN",
         stage != nullptr ? stage : "UNKNOWN",
@@ -946,7 +946,7 @@ static bool ggml_backend_xdna_acquire_q4_shared_kernel(
             ++resources->xclbin_registration_count;
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             if (std::getenv("GGML_XDNA_INSTANCE_TRACE") != nullptr) {
-                std::fprintf(stderr, "BJ1 REGISTER backend_id=%llu ordinal=%llu primary_xclbin=%p path=%s uuid=%s\n",
+                std::fprintf(stderr, "XDNA_BACKEND_INSTANCE REGISTER backend_id=%llu ordinal=%llu primary_xclbin=%p path=%s uuid=%s\n",
                     static_cast<unsigned long long>(ctx->backend_instance_id),
                     static_cast<unsigned long long>(ggml_backend_xdna_next_registration_id++),
                     static_cast<void *>(resources->xclbin.get()), resources->xclbin_path.c_str(),
@@ -1041,7 +1041,7 @@ static bool ggml_backend_xdna_init_kernel(
             ctx->device_context->xrt_device->register_xclbin(*ctx->xclbin);
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             if (std::getenv("GGML_XDNA_INSTANCE_TRACE") != nullptr) {
-                std::fprintf(stderr, "BJ1 REGISTER backend_id=%llu ordinal=%llu primary_xclbin=%p path=%s\n",
+                std::fprintf(stderr, "XDNA_BACKEND_INSTANCE REGISTER backend_id=%llu ordinal=%llu primary_xclbin=%p path=%s\n",
                     static_cast<unsigned long long>(ctx->backend_instance_id),
                     static_cast<unsigned long long>(ggml_backend_xdna_next_registration_id++),
                     static_cast<void *>(ctx->xclbin.get()), ctx->xclbin_path.c_str());
@@ -1058,7 +1058,7 @@ static bool ggml_backend_xdna_init_kernel(
             "ggml_xdna: XRT kernel ready: %s\n",
             ctx->kernel_name.c_str());
 
-        // LLAMA-XDNA-NPU1-INTEGRATION-A1: controlled one-shot W2IN block
+        // NPU1 integration: controlled one-shot W2IN block
         // Diagnostic-only one-shot W2IN block invocation; it remains off the
         // scheduler path and cannot affect ordinary backend initialization.
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
@@ -1078,7 +1078,7 @@ static bool ggml_backend_xdna_init_kernel(
         return false;
     }
 }
-// LLAMA-XDNA-NPU1-INTEGRATION-A1 - controlled single-block W2IN invocation.
+// NPU1 integration - controlled single-block W2IN invocation.
 //
 // The scheduler-advertised Q4 profile of this backend expresses only the
 // [2560,M] Q4_K K=2560 geometry and builds its payloads as 10 x 152-byte
@@ -1126,10 +1126,10 @@ static bool ggml_backend_xdna_w2in_block_probe_read(
 
 // MANDATORY pre-launch ordering rule for every HOST_ONLY BO the host wrote.
 //
-// Established by LLAMA-XDNA-OUTPUT-COMPLETION-A1/A2 on this host:
-//   * A1 (no pre-launch output flush): host prefill was visible instead of the
+// Established by output-completion validation on this host:
+//   * Without the pre-launch output flush: host prefill was visible instead of the
 //     device result at +1 us .. +265 ms -> control invalid.
-//   * A2 (same recipe + this flush): the golden block was visible at the FIRST
+//   * With the same recipe and this flush: the golden block was visible at the FIRST
 //     read after run.wait(), +7 us, while sync(FROM_DEVICE) measured 0 us
 //     (a cache operation, never a barrier).
 // The flush is therefore required, not optional, and it includes output BOs
@@ -1148,7 +1148,7 @@ void ggml_backend_xdna_sync_host_written_bo(
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
 // Implementation of the env-gated one-shot W2IN block probe.
 //
-// LLAMA-XDNA-W2IN-ONESHOT-A1: this body must run at most ONCE per process.
+// W2IN one-shot: this body must run at most ONCE per process.
 // The process-wide std::once_flag guard lives in the wrapper below
 // (ggml_backend_xdna_w2in_block_probe). The body itself is unchanged by this
 // experiment: kernel, XCLBIN, instructions, BO flags, sync rule, opcode,
@@ -1373,7 +1373,7 @@ static void ggml_backend_xdna_w2in_block_probe_impl(
     }
 }
 
-// LLAMA-XDNA-W2IN-ONESHOT-A1 - process-wide one-shot guard.
+// W2IN one-shot - process-wide one-shot guard.
 //
 // llama.cpp initializes the XDNA ACCEL backend twice in one process, so the
 // env-gated block probe used to run (and submit to the NPU) once per
@@ -1869,7 +1869,7 @@ static void ggml_backend_xdna_free(ggml_backend_t backend) {
                 "ggml_xdna: backend/device profile mismatch during free\n");
         }
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-        if (std::getenv("GGML_XDNA_INSTANCE_TRACE") != nullptr) std::fprintf(stderr, "BJ1 FREE backend_id=%llu active_backend_count_before=%zu device_ctx=%p xrt_device=%p\n", static_cast<unsigned long long>(ctx->backend_instance_id), device_ctx->active_backend_count, static_cast<void *>(device_ctx), static_cast<void *>(device_ctx->xrt_device.get()));
+        if (std::getenv("GGML_XDNA_INSTANCE_TRACE") != nullptr) std::fprintf(stderr, "XDNA_BACKEND_INSTANCE FREE backend_id=%llu active_backend_count_before=%zu device_ctx=%p xrt_device=%p\n", static_cast<unsigned long long>(ctx->backend_instance_id), device_ctx->active_backend_count, static_cast<void *>(device_ctx), static_cast<void *>(device_ctx->xrt_device.get()));
 #endif
 
         if (device_ctx->active_backend_count == 0) {
@@ -1882,7 +1882,7 @@ static void ggml_backend_xdna_free(ggml_backend_t backend) {
         }
 
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-        if (std::getenv("GGML_XDNA_INSTANCE_TRACE") != nullptr) std::fprintf(stderr, "BJ1 FREE backend_id=%llu active_backend_count_after=%zu\n", static_cast<unsigned long long>(ctx->backend_instance_id), device_ctx->active_backend_count);
+        if (std::getenv("GGML_XDNA_INSTANCE_TRACE") != nullptr) std::fprintf(stderr, "XDNA_BACKEND_INSTANCE FREE backend_id=%llu active_backend_count_after=%zu\n", static_cast<unsigned long long>(ctx->backend_instance_id), device_ctx->active_backend_count);
 #endif
         if (device_ctx->active_backend_count == 0) {
             device_ctx->active_profile =
@@ -2067,7 +2067,7 @@ static constexpr const char * GGML_XDNA_Q4K_INSTRUCTION_ENVS[] = {
     "GGML_XDNA_Q4K_M8192_INSTS", "GGML_XDNA_Q4K_M9216_INSTS",
 };
 
-static unsigned long ggml_backend_xdna_a7h1_process_id() {
+static unsigned long ggml_backend_xdna_profile_process_id() {
 #if defined(_WIN32)
     return static_cast<unsigned long>(GetCurrentProcessId());
 #else
@@ -2075,8 +2075,8 @@ static unsigned long ggml_backend_xdna_a7h1_process_id() {
 #endif
 }
 
-static const char * ggml_backend_xdna_a7f_conflicting_env(bool allow_a7h2_host_gate = false);
-static const char * ggml_backend_xdna_a7h1_environment_error(bool allow_a7h2_host_gate = false) {
+static const char * ggml_backend_xdna_q4_control_conflicting_env(bool allow_host_preflight_gate = false);
+static const char * ggml_backend_xdna_profile_environment_error(bool allow_host_preflight_gate = false) {
     const char * gate = std::getenv("GGML_XDNA_DIAG_Q4_ORD7_AT_ORD8");
     const char * host_gate = std::getenv("GGML_XDNA_DIAG_A7H2_HOST_PREFLIGHT_ONLY");
     if (host_gate != nullptr && std::strcmp(host_gate, "1") != 0) return "host_preflight_gate_invalid";
@@ -2095,17 +2095,17 @@ static const char * ggml_backend_xdna_a7h1_environment_error(bool allow_a7h2_hos
         std::strcmp(std::getenv("GGML_XDNA_Q4K_PERSISTENT_WEIGHTS"), "0") != 0) return "persistent_weights_must_be_0";
     if (std::getenv("GGML_XDNA_Q4K_TRANSPORT_CACHE") == nullptr ||
         std::strcmp(std::getenv("GGML_XDNA_Q4K_TRANSPORT_CACHE"), "0") != 0) return "transport_cache_must_be_0";
-    return ggml_backend_xdna_a7f_conflicting_env(allow_a7h2_host_gate);
+    return ggml_backend_xdna_q4_control_conflicting_env(allow_host_preflight_gate);
 }
 
-static bool ggml_backend_xdna_a7h1_profile_preflight(
+static bool ggml_backend_xdna_profile_preflight(
         const char * resolved_params,
         ggml_backend_xdna_kernel_profile profile,
         const std::string & parsed_xclbin_path,
-        bool allow_a7h2_host_gate,
+        bool allow_host_preflight_gate,
         const char ** failure_reason_out) {
-    const unsigned long pid = ggml_backend_xdna_a7h1_process_id();
-    std::fprintf(stderr, "A7H1_PROFILE_PREFLIGHT_START pid=%lu\n", pid);
+    const unsigned long pid = ggml_backend_xdna_profile_process_id();
+    std::fprintf(stderr, "XDNA_PROFILE_PROFILE_PREFLIGHT_START pid=%lu\n", pid);
     const char * backend_params = std::getenv("GGML_XDNA_BACKEND_PARAMS");
     const char * runtime_xclbin = std::getenv("GGML_XDNA_Q4K_RUNTIME_XCLBIN");
     const std::string expected_params = runtime_xclbin != nullptr
@@ -2122,7 +2122,7 @@ static bool ggml_backend_xdna_a7h1_profile_preflight(
     else if (resolved_params == nullptr || std::strcmp(resolved_params, expected_params.c_str()) != 0) profile_reason = "resolved_params_mismatch";
     else if (profile != ggml_backend_xdna_kernel_profile::q4k_q8k_k2560) profile_reason = "profile_not_q4k_q8k_k2560";
     else if (parsed_xclbin_path != runtime_xclbin) profile_reason = "parsed_xclbin_path_mismatch";
-    std::fprintf(stderr, "A7H1_PROFILE_SELECTED_CORRECTLY=%s pid=%lu reason=%s\n",
+    std::fprintf(stderr, "XDNA_PROFILE_PROFILE_SELECTED_CORRECTLY=%s pid=%lu reason=%s\n",
         profile_ok ? "YES" : "NO", pid, profile_reason);
 
     bool artifacts_ok = profile_ok;
@@ -2160,39 +2160,39 @@ static bool ggml_backend_xdna_a7h1_profile_preflight(
             break;
         }
     }
-    std::fprintf(stderr, "A7H1_PROFILE_ARTIFACTS_VERIFIED=%s pid=%lu reason=%s\n",
+    std::fprintf(stderr, "XDNA_PROFILE_PROFILE_ARTIFACTS_VERIFIED=%s pid=%lu reason=%s\n",
         artifacts_ok ? "YES" : "NO", pid, artifact_reason);
 
-    const char * config_reason = ggml_backend_xdna_a7h1_environment_error(allow_a7h2_host_gate);
+    const char * config_reason = ggml_backend_xdna_profile_environment_error(allow_host_preflight_gate);
     const bool config_ok = profile_ok && artifacts_ok && config_reason == nullptr;
     if (config_reason == nullptr && !profile_ok) config_reason = "profile_not_validated";
     if (config_reason == nullptr && !artifacts_ok) config_reason = "artifacts_not_validated";
-    std::fprintf(stderr, "A7H1_A7F_CONTROL_CONFIG_VALID=%s pid=%lu reason=%s\n",
+    std::fprintf(stderr, "XDNA_PROFILE_Q4_CONTROL_CONFIG_VALID=%s pid=%lu reason=%s\n",
         config_ok ? "YES" : "NO", pid, config_ok ? "validated" : config_reason);
     const bool pass = profile_ok && artifacts_ok && config_ok;
     const char * final_reason = pass ? "validated" :
         (!profile_ok ? profile_reason : (!artifacts_ok ? artifact_reason : config_reason));
     if (failure_reason_out != nullptr) *failure_reason_out = pass ? nullptr : final_reason;
-    std::fprintf(stderr, "A7H1_PROFILE_PREFLIGHT_RESULT=%s pid=%lu reason=%s\n",
+    std::fprintf(stderr, "XDNA_PROFILE_PROFILE_PREFLIGHT_RESULT=%s pid=%lu reason=%s\n",
         pass ? "PASS" : "FAIL", pid, final_reason);
     std::fflush(stderr);
     return pass;
 }
 
-static void ggml_backend_xdna_a7h2_log_host_only_stop(
+static void ggml_backend_xdna_log_host_only_stop(
         bool preflight_passed, const char * failure_reason) {
     std::fprintf(stderr,
-        "A7H2_HOST_ONLY_STOP pid=%lu stage=AFTER_A7H1_PREFLIGHT preflight=%s backend_context_created=NO computational_xrt_setup=NOT_REACHED backend_return=NULL reason=%s",
-        ggml_backend_xdna_a7h1_process_id(), preflight_passed ? "PASS" : "FAIL",
+        "XDNA_HOST_PREFLIGHT_STOP pid=%lu stage=AFTER_PROFILE_PREFLIGHT preflight=%s backend_context_created=NO computational_xrt_setup=NOT_REACHED backend_return=NULL reason=%s",
+        ggml_backend_xdna_profile_process_id(), preflight_passed ? "PASS" : "FAIL",
         preflight_passed ? "preflight_only" : "preflight_rejected");
     if (!preflight_passed && failure_reason != nullptr) {
-        std::fprintf(stderr, " a7h1_reason=%s", failure_reason);
+        std::fprintf(stderr, " profile_reason=%s", failure_reason);
     }
     std::fputc('\n', stderr);
     std::fflush(stderr);
 }
 
-static const char * ggml_backend_xdna_a7f_conflicting_env(bool allow_a7h2_host_gate) {
+static const char * ggml_backend_xdna_q4_control_conflicting_env(bool allow_host_preflight_gate) {
     static const char * const names[] = {
         "GGML_XDNA_BH1_REPLAY_F32", "GGML_XDNA_BH1_REPLAY_NATIVE_Q4",
         "GGML_XDNA_BH1_REPLAY_Q4_TRANSPORT", "GGML_XDNA_BH1_REPLAY_Q8",
@@ -2224,7 +2224,7 @@ static const char * ggml_backend_xdna_a7f_conflicting_env(bool allow_a7h2_host_g
                 if (std::strcmp(value, expected_params.c_str()) == 0) continue;
             }
         }
-        if (allow_a7h2_host_gate &&
+        if (allow_host_preflight_gate &&
             std::strcmp(name, "GGML_XDNA_DIAG_A7H2_HOST_PREFLIGHT_ONLY") == 0 &&
             std::strcmp(value, "1") == 0 &&
             std::getenv("GGML_XDNA_DIAG_Q4_ORD7_AT_ORD8") != nullptr &&
@@ -2236,19 +2236,19 @@ static const char * ggml_backend_xdna_a7f_conflicting_env(bool allow_a7h2_host_g
 }
 #endif
 
-static uint64_t ggml_backend_xdna_a7c_elapsed_ns(
+static uint64_t ggml_backend_xdna_elapsed_ns(
         const ggml_backend_xdna_backend_context * ctx,
         std::chrono::steady_clock::time_point point = std::chrono::steady_clock::now()) {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-        point - ctx->a7c_diagnostics_epoch).count());
+        point - ctx->diagnostics_epoch).count());
 }
 
-static uint64_t ggml_backend_xdna_a7c_new_resource_generation(
+static uint64_t ggml_backend_xdna_new_resource_generation(
         ggml_backend_xdna_backend_context * ctx) {
     return ++ctx->m9216_next_resource_generation;
 }
 
-static const char * ggml_backend_xdna_a7c_log_offline(
+static const char * ggml_backend_xdna_log_offline(
         ggml_backend_xdna_backend_context * ctx, const char * marker,
         uint64_t ordinal, uint64_t correlation_id, uint64_t xrt_sequence,
         const char * node_name, int node_index) noexcept {
@@ -2278,7 +2278,7 @@ static const char * ggml_backend_xdna_a7c_log_offline(
 
 }
 
-static void ggml_backend_xdna_a7c_log_correlation(
+static void ggml_backend_xdna_log_correlation(
         const ggml_backend_xdna_backend_context * ctx, uint64_t ordinal,
         uint64_t correlation_id, uint64_t xrt_sequence, const char * node_name,
         int node_index, ert_cmd_state pre_wait_state, ert_cmd_state returned_state,
@@ -2287,7 +2287,7 @@ static void ggml_backend_xdna_a7c_log_correlation(
         const char * offline_pre, const char * offline_post,
         uint64_t persistent_q4_generation, const char * q4_sha, const char * q8_sha) {
     std::fprintf(stderr,
-        "A7C_CORRELATION backend_id=%llu ordinal=%llu correlation_id=%llu xrt_seq=%llu node=%s node_index=%d M=9216 K=2560 RHS=1 kernel_ns=%llu state_query_ns=%llu wait_ns=%llu output_sync_ns=%llu pre_wait_state=%d:%s returned_state=%d:%s hw_context_gen=%llu kernel_gen=%llu instruction_bo_gen=%llu shared_q4_bo_gen=%llu q8_bo_gen=%llu output_bo_gen=%llu persistent_q4_bo_gen=%llu q4_transport_sha256=%s q8_sha256=%s offline_pre=%s offline_post=%s output_sync=%s\n",
+        "XDNA_TRACE_CORRELATION backend_id=%llu ordinal=%llu correlation_id=%llu xrt_seq=%llu node=%s node_index=%d M=9216 K=2560 RHS=1 kernel_ns=%llu state_query_ns=%llu wait_ns=%llu output_sync_ns=%llu pre_wait_state=%d:%s returned_state=%d:%s hw_context_gen=%llu kernel_gen=%llu instruction_bo_gen=%llu shared_q4_bo_gen=%llu q8_bo_gen=%llu output_bo_gen=%llu persistent_q4_bo_gen=%llu q4_transport_sha256=%s q8_sha256=%s offline_pre=%s offline_post=%s output_sync=%s\n",
         static_cast<unsigned long long>(ctx->backend_instance_id),
         static_cast<unsigned long long>(ordinal), static_cast<unsigned long long>(correlation_id),
         static_cast<unsigned long long>(xrt_sequence), node_name, node_index,
@@ -2799,7 +2799,7 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
 
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
         if (std::getenv("GGML_XDNA_SPLIT_ORDER_TRACE") != nullptr) {
-            std::fprintf(stderr, "BI1 XDNA node name=%s src0=%s src0_ptr=%p src1=%s src1_ptr=%p dst_ptr=%p\n", node->name, node->src[0] ? node->src[0]->name : "", node->src[0] ? node->src[0]->data : nullptr, node->src[1] ? node->src[1]->name : "", node->src[1] ? node->src[1]->data : nullptr, node->data);
+            std::fprintf(stderr, "XDNA_BACKEND_TRACE XDNA node name=%s src0=%s src0_ptr=%p src1=%s src1_ptr=%p dst_ptr=%p\n", node->name, node->src[0] ? node->src[0]->name : "", node->src[0] ? node->src[0]->data : nullptr, node->src[1] ? node->src[1]->name : "", node->src[1] ? node->src[1]->data : nullptr, node->data);
         }
 #endif
         const enum ggml_status status =
@@ -3189,7 +3189,7 @@ static bool ggml_backend_xdna_run_batched_shape(
             state.buf_instr = state.bo_instr->map<void *>(); state.buf_q4 = state.bo_q4->map<void *>();
             state.buf_q8 = state.bo_q8->map<void *>(); state.buf_out = state.bo_out->map<float *>();
             std::memcpy(state.buf_instr, state.instructions.data(), instruction_count * sizeof(uint32_t));
-            // LLAMA-XDNA-K2560-INTEGRATION-A1: mandatory host ordering rule.
+            // K=2560 integration: mandatory host ordering rule.
             ggml_backend_xdna_sync_host_written_bo(*state.bo_instr, "K=2560 batched instruction BO (CACHEABLE)");
             state.instruction_count = instruction_count; state.bos_initialized = true;
             GGML_XDNA_XRT_TRACE(ctx, ("M" + std::to_string(state.rows)).c_str(),
@@ -3248,7 +3248,7 @@ static bool ggml_backend_xdna_run_batched_shape(
 #endif
             #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             if (std::getenv("GGML_XDNA_XRT_SEQUENCE_TRACE") != nullptr) {
-                std::fprintf(stderr, "BG1 XRT seq=%llu BEFORE kernel shape=M%zu node=batched opcode=3 K=2560 rhs=1 instr_bytes=%zu instr_count=%u kernel=%p hw_context=%p group_ids=%u,%u,%u,%u\n",
+                std::fprintf(stderr, "XDNA_XRT_SEQUENCE seq=%llu BEFORE kernel shape=M%zu node=batched opcode=3 K=2560 rhs=1 instr_bytes=%zu instr_count=%u kernel=%p hw_context=%p group_ids=%u,%u,%u,%u\n",
                     static_cast<unsigned long long>(trace_sequence_id), state.rows, instruction_bytes, instruction_count,
                     static_cast<void *>(state.kernel.get()), static_cast<void *>(state.hw_context.get()),
                     state.kernel->group_id(1), state.kernel->group_id(3), state.kernel->group_id(4), state.kernel->group_id(5));
@@ -3265,9 +3265,9 @@ static bool ggml_backend_xdna_run_batched_shape(
 #endif
             #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             if (std::getenv("GGML_XDNA_XRT_SEQUENCE_TRACE") != nullptr) {
-                std::fprintf(stderr, "BG1 XRT seq=%llu AFTER kernel run_created shape=M%zu\n", static_cast<unsigned long long>(trace_sequence_id), state.rows);
-                std::fprintf(stderr, "BG1 XRT seq=%llu BO instr=%p q4=%p q8=%p out=%p persistent_q4=0\n", static_cast<unsigned long long>(trace_sequence_id), static_cast<void *>(state.bo_instr.get()), static_cast<void *>(state.bo_q4.get()), static_cast<void *>(state.bo_q8.get()), static_cast<void *>(state.bo_out.get()));
-                std::fprintf(stderr, "BG1 XRT seq=%llu BEFORE run.wait()\n", static_cast<unsigned long long>(trace_sequence_id));
+                std::fprintf(stderr, "XDNA_XRT_SEQUENCE seq=%llu AFTER kernel run_created shape=M%zu\n", static_cast<unsigned long long>(trace_sequence_id), state.rows);
+                std::fprintf(stderr, "XDNA_XRT_SEQUENCE seq=%llu BO instr=%p q4=%p q8=%p out=%p persistent_q4=0\n", static_cast<unsigned long long>(trace_sequence_id), static_cast<void *>(state.bo_instr.get()), static_cast<void *>(state.bo_q4.get()), static_cast<void *>(state.bo_q8.get()), static_cast<void *>(state.bo_out.get()));
+                std::fprintf(stderr, "XDNA_XRT_SEQUENCE seq=%llu BEFORE run.wait()\n", static_cast<unsigned long long>(trace_sequence_id));
             }
 #endif
             GGML_XDNA_DIAG_ONLY(const auto submit_end = std::chrono::steady_clock::now();)
@@ -3283,7 +3283,7 @@ static bool ggml_backend_xdna_run_batched_shape(
 #endif
             #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             if (std::getenv("GGML_XDNA_XRT_SEQUENCE_TRACE") != nullptr) {
-                std::fprintf(stderr, "BG1 XRT seq=%llu AFTER run.wait()\n", static_cast<unsigned long long>(trace_sequence_id));
+                std::fprintf(stderr, "XDNA_XRT_SEQUENCE seq=%llu AFTER run.wait()\n", static_cast<unsigned long long>(trace_sequence_id));
             }
 #endif
             if (completion_state != ERT_CMD_STATE_COMPLETED) {
@@ -3308,7 +3308,7 @@ static bool ggml_backend_xdna_run_batched_shape(
             GGML_XDNA_DIAG_ONLY(const auto t0 = std::chrono::steady_clock::now();)
             #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             if (std::getenv("GGML_XDNA_XRT_SEQUENCE_TRACE") != nullptr) {
-                std::fprintf(stderr, "BG1 XRT seq=%llu BEFORE output sync shape=M%zu\n", static_cast<unsigned long long>(trace_sequence_id), state.rows);
+                std::fprintf(stderr, "XDNA_XRT_SEQUENCE seq=%llu BEFORE output sync shape=M%zu\n", static_cast<unsigned long long>(trace_sequence_id), state.rows);
             }
 #endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
@@ -3328,7 +3328,7 @@ static bool ggml_backend_xdna_run_batched_shape(
             GGML_XDNA_DIAG_ONLY(const auto t1 = std::chrono::steady_clock::now();)
             #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             if (std::getenv("GGML_XDNA_XRT_SEQUENCE_TRACE") != nullptr) {
-                std::fprintf(stderr, "BG1 XRT seq=%llu AFTER output sync shape=M%zu\n", static_cast<unsigned long long>(trace_sequence_id), state.rows);
+                std::fprintf(stderr, "XDNA_XRT_SEQUENCE seq=%llu AFTER output sync shape=M%zu\n", static_cast<unsigned long long>(trace_sequence_id), state.rows);
             }
 #endif
             GGML_XDNA_DIAG_ONLY(ctx->timers.output_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();)
@@ -3341,7 +3341,7 @@ static bool ggml_backend_xdna_run_batched_shape(
         return false;
     }
 }
-// LLAMA-XDNA-Q4K-PERSISTENT-WEIGHTS-A1
+// persistent Q4_K weights
 //
 // Returns a persistent, already-filled, already-synced Q4 transport BO for one
 // M=9216 weight tensor, or nullptr when the persistent path is disabled,
@@ -3395,7 +3395,7 @@ static xrt::bo * ggml_backend_xdna_m9216_weight_bo(
             XRT_BO_FLAGS_HOST_ONLY,
             ctx->q4_m9216_kernel->group_id(3));
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-        const uint64_t resource_generation = ggml_backend_xdna_a7c_new_resource_generation(ctx);
+        const uint64_t resource_generation = ggml_backend_xdna_new_resource_generation(ctx);
 #endif
 
         void * mapped = bo->map<void *>();
@@ -3502,46 +3502,46 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
         return false;
     }
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-    const char * a7f_gate_value = std::getenv("GGML_XDNA_DIAG_Q4_ORD7_AT_ORD8");
-    const bool a7f_requested = a7f_gate_value != nullptr && std::strcmp(a7f_gate_value, "1") == 0;
-    if (a7f_gate_value != nullptr && !a7f_requested) {
-        std::fprintf(stderr, "A7F_Q4_CONTROL_ABORT reason=invalid_gate_value\n");
-        std::fprintf(stderr, "A7F_ONLY_Q4_TRANSPORT_BYTES_CHANGED=NO reason=invalid_gate_value\n");
+    const char * q4_control_gate_value = std::getenv("GGML_XDNA_DIAG_Q4_ORD7_AT_ORD8");
+    const bool q4_control_requested = q4_control_gate_value != nullptr && std::strcmp(q4_control_gate_value, "1") == 0;
+    if (q4_control_gate_value != nullptr && !q4_control_requested) {
+        std::fprintf(stderr, "XDNA_Q4_CONTROL_ABORT reason=invalid_gate_value\n");
+        std::fprintf(stderr, "XDNA_Q4_CONTROL_ONLY_TRANSPORT_BYTES_CHANGED=NO reason=invalid_gate_value\n");
         return false;
     }
-    if (!ctx->a7f_q4_control_gate_checked) {
-        ctx->a7f_q4_control_gate_checked = true;
-        ctx->a7f_q4_control_enabled = a7f_requested;
-        if (a7f_requested) {
+    if (!ctx->q4_control_gate_checked) {
+        ctx->q4_control_gate_checked = true;
+        ctx->q4_control_enabled = q4_control_requested;
+        if (q4_control_requested) {
             const char * persistent = std::getenv("GGML_XDNA_Q4K_PERSISTENT_WEIGHTS");
             const char * cache = std::getenv("GGML_XDNA_Q4K_TRANSPORT_CACHE");
-            const char * conflict = ggml_backend_xdna_a7f_conflicting_env();
-            const char * profile_env_error = ggml_backend_xdna_a7h1_environment_error();
+            const char * conflict = ggml_backend_xdna_q4_control_conflicting_env();
+            const char * profile_env_error = ggml_backend_xdna_profile_environment_error();
             if (persistent == nullptr || std::strcmp(persistent, "0") != 0 ||
                 cache == nullptr || std::strcmp(cache, "0") != 0 || conflict != nullptr || profile_env_error != nullptr) {
-                std::fprintf(stderr, "A7F_Q4_CONTROL_ABORT reason=environment_invariant persistent=%s cache=%s conflict=%s profile_env=%s\n",
+                std::fprintf(stderr, "XDNA_Q4_CONTROL_ABORT reason=environment_invariant persistent=%s cache=%s conflict=%s profile_env=%s\n",
                     persistent != nullptr ? persistent : "unset", cache != nullptr ? cache : "unset",
                     conflict != nullptr ? conflict : "none", profile_env_error != nullptr ? profile_env_error : "validated");
-                std::fprintf(stderr, "A7F_ONLY_Q4_TRANSPORT_BYTES_CHANGED=NO reason=environment_invariant\n");
+                std::fprintf(stderr, "XDNA_Q4_CONTROL_ONLY_TRANSPORT_BYTES_CHANGED=NO reason=environment_invariant\n");
                 return false;
             }
             try {
-                ctx->a7f_q4_control_snapshot = std::make_unique<uint8_t[]>(q4_transport_bytes);
-                ctx->a7f_q4_control_snapshot_bytes = q4_transport_bytes;
+                ctx->q4_control_snapshot = std::make_unique<uint8_t[]>(q4_transport_bytes);
+                ctx->q4_control_snapshot_bytes = q4_transport_bytes;
             } catch (const std::exception & e) {
-                std::fprintf(stderr, "A7F_Q4_CONTROL_ABORT reason=snapshot_preallocation error=%s\n", e.what());
-                std::fprintf(stderr, "A7F_ONLY_Q4_TRANSPORT_BYTES_CHANGED=NO reason=snapshot_preallocation\n");
+                std::fprintf(stderr, "XDNA_Q4_CONTROL_ABORT reason=snapshot_preallocation error=%s\n", e.what());
+                std::fprintf(stderr, "XDNA_Q4_CONTROL_ONLY_TRANSPORT_BYTES_CHANGED=NO reason=snapshot_preallocation\n");
                 return false;
             } catch (...) {
-                std::fprintf(stderr, "A7F_Q4_CONTROL_ABORT reason=snapshot_preallocation\n");
-                std::fprintf(stderr, "A7F_ONLY_Q4_TRANSPORT_BYTES_CHANGED=NO reason=snapshot_preallocation\n");
+                std::fprintf(stderr, "XDNA_Q4_CONTROL_ABORT reason=snapshot_preallocation\n");
+                std::fprintf(stderr, "XDNA_Q4_CONTROL_ONLY_TRANSPORT_BYTES_CHANGED=NO reason=snapshot_preallocation\n");
                 return false;
             }
-            std::fprintf(stderr, "A7F_Q4_CONTROL_SNAPSHOT_PREALLOCATED bytes=%zu before_ordinal=1\n", q4_transport_bytes);
+            std::fprintf(stderr, "XDNA_Q4_CONTROL_SNAPSHOT_PREALLOCATED bytes=%zu before_ordinal=1\n", q4_transport_bytes);
         }
-    } else if (ctx->a7f_q4_control_enabled != a7f_requested) {
-        std::fprintf(stderr, "A7F_Q4_CONTROL_ABORT reason=gate_changed_during_session\n");
-        std::fprintf(stderr, "A7F_ONLY_Q4_TRANSPORT_BYTES_CHANGED=NO reason=gate_changed_during_session\n");
+    } else if (ctx->q4_control_enabled != q4_control_requested) {
+        std::fprintf(stderr, "XDNA_Q4_CONTROL_ABORT reason=gate_changed_during_session\n");
+        std::fprintf(stderr, "XDNA_Q4_CONTROL_ONLY_TRANSPORT_BYTES_CHANGED=NO reason=gate_changed_during_session\n");
         return false;
     }
 #endif
@@ -3563,34 +3563,34 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
 
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
     const uint64_t capture_index = ++ctx->m9216_diagnostic_ordinal;
-    const bool a7c_ordinal8_target = capture_index == 8 && k == 2560 && rhs == 1 && std::strcmp(node_name, "ffn_up-3") == 0;
+    const bool trace_ordinal8_target = capture_index == 8 && k == 2560 && rhs == 1 && std::strcmp(node_name, "ffn_up-3") == 0;
 #endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-    if (ctx->a7f_q4_control_enabled) {
+    if (ctx->q4_control_enabled) {
         const char * persistent_env = std::getenv("GGML_XDNA_Q4K_PERSISTENT_WEIGHTS");
         const char * cache_env = std::getenv("GGML_XDNA_Q4K_TRANSPORT_CACHE");
-        const char * conflicting_env = ggml_backend_xdna_a7f_conflicting_env();
-        const char * profile_env_error = ggml_backend_xdna_a7h1_environment_error();
+        const char * conflicting_env = ggml_backend_xdna_q4_control_conflicting_env();
+        const char * profile_env_error = ggml_backend_xdna_profile_environment_error();
         if (persistent_env == nullptr || std::strcmp(persistent_env, "0") != 0 ||
             cache_env == nullptr || std::strcmp(cache_env, "0") != 0 || conflicting_env != nullptr || profile_env_error != nullptr) {
-            std::fprintf(stderr, "A7F_ONLY_Q4_TRANSPORT_BYTES_CHANGED=NO reason=environment_changed conflict=%s profile_env=%s\n",
+            std::fprintf(stderr, "XDNA_Q4_CONTROL_ONLY_TRANSPORT_BYTES_CHANGED=NO reason=environment_changed conflict=%s profile_env=%s\n",
                 conflicting_env != nullptr ? conflicting_env : "none", profile_env_error != nullptr ? profile_env_error : "validated");
-            std::fprintf(stderr, "A7F_Q4_CONTROL_ABORT reason=environment_changed\n");
+            std::fprintf(stderr, "XDNA_Q4_CONTROL_ABORT reason=environment_changed\n");
             return false;
         }
         const bool source_target = capture_index == 7 && rows == 9216 && k == 2560 && rhs == 1 && node_name != nullptr && std::strcmp(node_name, "ffn_gate-3") == 0;
         const bool control_target = capture_index == 8 && rows == 9216 && k == 2560 && rhs == 1 && node_name != nullptr && std::strcmp(node_name, "ffn_up-3") == 0;
         if ((capture_index == 7 && !source_target) || (capture_index == 8 && !control_target) || capture_index > 8) {
-            std::fprintf(stderr, "A7F_Q4_CONTROL_ABORT reason=unexpected_ordinal ordinal=%llu node=%s M=%zu K=%lld RHS=%lld\n",
+            std::fprintf(stderr, "XDNA_Q4_CONTROL_ABORT reason=unexpected_ordinal ordinal=%llu node=%s M=%zu K=%lld RHS=%lld\n",
                 static_cast<unsigned long long>(capture_index), node_name != nullptr ? node_name : "(null)", rows,
                 static_cast<long long>(k), static_cast<long long>(rhs));
-            std::fprintf(stderr, "A7F_ONLY_Q4_TRANSPORT_BYTES_CHANGED=NO reason=unexpected_ordinal\n");
+            std::fprintf(stderr, "XDNA_Q4_CONTROL_ONLY_TRANSPORT_BYTES_CHANGED=NO reason=unexpected_ordinal\n");
             return false;
         }
-        if (capture_index == 8 && (!ctx->a7f_q4_control_snapshot_valid ||
-            ctx->a7f_q4_control_snapshot == nullptr || ctx->a7f_q4_control_snapshot_bytes != q4_transport_bytes)) {
-            std::fprintf(stderr, "A7F_Q4_CONTROL_ABORT reason=ordinal7_snapshot_unavailable ordinal=8\n");
-            std::fprintf(stderr, "A7F_ONLY_Q4_TRANSPORT_BYTES_CHANGED=NO reason=ordinal7_snapshot_unavailable\n");
+        if (capture_index == 8 && (!ctx->q4_control_snapshot_valid ||
+            ctx->q4_control_snapshot == nullptr || ctx->q4_control_snapshot_bytes != q4_transport_bytes)) {
+            std::fprintf(stderr, "XDNA_Q4_CONTROL_ABORT reason=ordinal7_snapshot_unavailable ordinal=8\n");
+            std::fprintf(stderr, "XDNA_Q4_CONTROL_ONLY_TRANSPORT_BYTES_CHANGED=NO reason=ordinal7_snapshot_unavailable\n");
             return false;
         }
     }
@@ -3610,11 +3610,11 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
     char q8_sha[65] = "NOT_READY";
     char instruction_sha[65] = "NOT_READY";
     char q4_transport_sha[65] = "NOT_CAPTURED";
-    ert_cmd_state a7c_pre_wait_state = ERT_CMD_STATE_NEW;
-    ert_cmd_state a7c_wait_returned_state = ERT_CMD_STATE_NEW;
-    uint64_t a7c_kernel_ns = 0, a7c_state_query_ns = 0, a7c_wait_ns = 0, a7c_output_sync_ns = 0;
-    const char * a7c_offline_pre = "not_taken";
-    const char * a7c_offline_post = "not_taken";
+    ert_cmd_state trace_pre_wait_state = ERT_CMD_STATE_NEW;
+    ert_cmd_state trace_wait_returned_state = ERT_CMD_STATE_NEW;
+    uint64_t trace_kernel_ns = 0, trace_state_query_ns = 0, trace_wait_ns = 0, trace_output_sync_ns = 0;
+    const char * trace_offline_pre = "not_taken";
+    const char * trace_offline_post = "not_taken";
     ggml_backend_xdna_m9216_digest(q4_rows, q4_rows_bytes, q4_native_sha);
 #endif
     #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
@@ -3627,44 +3627,44 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
         const bool timed_wait_diag = std::getenv("GGML_XDNA_DIAG_TIMED_WAIT") != nullptr;
         const bool recreate_bundle = std::strcmp(node_name, "ffn_gate-4") == 0 && std::getenv("GGML_XDNA_DIAG_RECREATE_M9216_BUNDLE_BEFORE_9") != nullptr;
-        if (std::getenv("GGML_XDNA_DIAG_RECREATE_M9216_BUNDLE_BEFORE_9") != nullptr) std::fprintf(stderr, "BO1 node=%s K=%d M=%zu rhs=1 ordinal=%llu recreate=%d\n", node_name, 2560, rows, static_cast<unsigned long long>(capture_index), recreate_bundle ? 1 : 0);
-        const char * bq1_stage = std::getenv("GGML_XDNA_BQ1_STAGE");
-        if (capture_index == 2 && bq1_stage != nullptr && std::strcmp(bq1_stage, "bo1") == 0) {
+        if (std::getenv("GGML_XDNA_DIAG_RECREATE_M9216_BUNDLE_BEFORE_9") != nullptr) std::fprintf(stderr, "XDNA_BUFFER_OBJECT node=%s K=%d M=%zu rhs=1 ordinal=%llu recreate=%d\n", node_name, 2560, rows, static_cast<unsigned long long>(capture_index), recreate_bundle ? 1 : 0);
+        const char * reset_stage = std::getenv("GGML_XDNA_BQ1_STAGE");
+        if (capture_index == 2 && reset_stage != nullptr && std::strcmp(reset_stage, "bo1") == 0) {
             const std::string kernel_name = ctx->q4_m9216_kernel->get_name();
-            std::fprintf(stderr, "BQ1 BO1_ORDER BEFORE kernel_reset\n"); ctx->q4_m9216_kernel.reset(); std::fprintf(stderr, "BQ1 BO1_ORDER AFTER kernel_reset\n");
-            std::fprintf(stderr, "BQ1 BO1_ORDER BEFORE instr_reset\n"); ctx->q4_m9216_bo_instr.reset(); std::fprintf(stderr, "BQ1 BO1_ORDER AFTER instr_reset\n");
-            std::fprintf(stderr, "BQ1 BO1_ORDER BEFORE q4_reset\n"); ctx->q4_m9216_bo_q4.reset(); std::fprintf(stderr, "BQ1 BO1_ORDER AFTER q4_reset\n");
-            std::fprintf(stderr, "BQ1 BO1_ORDER BEFORE q8_reset\n"); ctx->q4_m9216_bo_q8.reset(); std::fprintf(stderr, "BQ1 BO1_ORDER AFTER q8_reset\n");
-            std::fprintf(stderr, "BQ1 BO1_ORDER BEFORE out_reset\n"); ctx->q4_m9216_bo_out.reset(); std::fprintf(stderr, "BQ1 BO1_ORDER AFTER out_reset\n");
+            std::fprintf(stderr, "XDNA_RESOURCE_RESET BUFFER_OBJECT_ORDER BEFORE kernel_reset\n"); ctx->q4_m9216_kernel.reset(); std::fprintf(stderr, "XDNA_RESOURCE_RESET BUFFER_OBJECT_ORDER AFTER kernel_reset\n");
+            std::fprintf(stderr, "XDNA_RESOURCE_RESET BUFFER_OBJECT_ORDER BEFORE instr_reset\n"); ctx->q4_m9216_bo_instr.reset(); std::fprintf(stderr, "XDNA_RESOURCE_RESET BUFFER_OBJECT_ORDER AFTER instr_reset\n");
+            std::fprintf(stderr, "XDNA_RESOURCE_RESET BUFFER_OBJECT_ORDER BEFORE q4_reset\n"); ctx->q4_m9216_bo_q4.reset(); std::fprintf(stderr, "XDNA_RESOURCE_RESET BUFFER_OBJECT_ORDER AFTER q4_reset\n");
+            std::fprintf(stderr, "XDNA_RESOURCE_RESET BUFFER_OBJECT_ORDER BEFORE q8_reset\n"); ctx->q4_m9216_bo_q8.reset(); std::fprintf(stderr, "XDNA_RESOURCE_RESET BUFFER_OBJECT_ORDER AFTER q8_reset\n");
+            std::fprintf(stderr, "XDNA_RESOURCE_RESET BUFFER_OBJECT_ORDER BEFORE out_reset\n"); ctx->q4_m9216_bo_out.reset(); std::fprintf(stderr, "XDNA_RESOURCE_RESET BUFFER_OBJECT_ORDER AFTER out_reset\n");
             ctx->q4_m9216_weight_bos.clear(); ctx->q4_m9216_bos_initialized = false;
-            std::fprintf(stderr, "BQ1 BO1_ORDER BEFORE hw_context_reset\n"); ctx->q4_m9216_hw_context.reset(); std::fprintf(stderr, "BQ1 BO1_ORDER AFTER hw_context_reset\n");
+            std::fprintf(stderr, "XDNA_RESOURCE_RESET BUFFER_OBJECT_ORDER BEFORE hw_context_reset\n"); ctx->q4_m9216_hw_context.reset(); std::fprintf(stderr, "XDNA_RESOURCE_RESET BUFFER_OBJECT_ORDER AFTER hw_context_reset\n");
             device.register_xclbin(*ctx->q4_m9216_xclbin);
             ctx->q4_m9216_hw_context = std::make_shared<xrt::hw_context>(device, ctx->q4_m9216_xclbin->get_uuid());
-            ctx->m9216_hw_context_generation = ggml_backend_xdna_a7c_new_resource_generation(ctx);
+            ctx->m9216_hw_context_generation = ggml_backend_xdna_new_resource_generation(ctx);
             ctx->q4_m9216_kernel = std::make_unique<xrt::kernel>(*ctx->q4_m9216_hw_context, kernel_name);
-            ctx->m9216_kernel_generation = ggml_backend_xdna_a7c_new_resource_generation(ctx);
-            std::fprintf(stderr, "BQ1 BO1_ORDER RECREATE kernel=%p hw_context=%p groups=%u,%u,%u,%u\n", static_cast<void *>(ctx->q4_m9216_kernel.get()), static_cast<void *>(ctx->q4_m9216_hw_context.get()), ctx->q4_m9216_kernel->group_id(1), ctx->q4_m9216_kernel->group_id(3), ctx->q4_m9216_kernel->group_id(4), ctx->q4_m9216_kernel->group_id(5));
+            ctx->m9216_kernel_generation = ggml_backend_xdna_new_resource_generation(ctx);
+            std::fprintf(stderr, "XDNA_RESOURCE_RESET BUFFER_OBJECT_ORDER RECREATE kernel=%p hw_context=%p groups=%u,%u,%u,%u\n", static_cast<void *>(ctx->q4_m9216_kernel.get()), static_cast<void *>(ctx->q4_m9216_hw_context.get()), ctx->q4_m9216_kernel->group_id(1), ctx->q4_m9216_kernel->group_id(3), ctx->q4_m9216_kernel->group_id(4), ctx->q4_m9216_kernel->group_id(5));
         }
-        if (capture_index == 2 && bq1_stage != nullptr && std::strcmp(bq1_stage, "bo1") != 0 && std::strcmp(bq1_stage, "none") != 0) {
-            const bool reset_kernel = std::strcmp(bq1_stage, "kernel") == 0 || std::strcmp(bq1_stage, "context") == 0 || std::strcmp(bq1_stage, "xclbin") == 0;
-            const bool reset_context = std::strcmp(bq1_stage, "context") == 0 || std::strcmp(bq1_stage, "xclbin") == 0;
-            const bool reset_xclbin = std::strcmp(bq1_stage, "xclbin") == 0;
-            std::fprintf(stderr, "BQ1 PARTIAL BEFORE stage=%s m9216_bos=%d weight_bos=%zu\n", bq1_stage, ctx->q4_m9216_bos_initialized ? 1 : 0, ctx->q4_m9216_weight_bos.size());
-            std::fprintf(stderr, "BQ1 BEFORE instr_reset\n"); ctx->q4_m9216_bo_instr.reset(); std::fprintf(stderr, "BQ1 AFTER instr_reset\n");
-            std::fprintf(stderr, "BQ1 BEFORE q4_reset\n"); ctx->q4_m9216_bo_q4.reset(); std::fprintf(stderr, "BQ1 AFTER q4_reset\n");
-            std::fprintf(stderr, "BQ1 BEFORE q8_reset\n"); ctx->q4_m9216_bo_q8.reset(); std::fprintf(stderr, "BQ1 AFTER q8_reset\n");
-            std::fprintf(stderr, "BQ1 BEFORE out_reset\n"); ctx->q4_m9216_bo_out.reset(); std::fprintf(stderr, "BQ1 AFTER out_reset\n");
+        if (capture_index == 2 && reset_stage != nullptr && std::strcmp(reset_stage, "bo1") != 0 && std::strcmp(reset_stage, "none") != 0) {
+            const bool reset_kernel = std::strcmp(reset_stage, "kernel") == 0 || std::strcmp(reset_stage, "context") == 0 || std::strcmp(reset_stage, "xclbin") == 0;
+            const bool reset_context = std::strcmp(reset_stage, "context") == 0 || std::strcmp(reset_stage, "xclbin") == 0;
+            const bool reset_xclbin = std::strcmp(reset_stage, "xclbin") == 0;
+            std::fprintf(stderr, "XDNA_RESOURCE_RESET PARTIAL BEFORE stage=%s m9216_bos=%d weight_bos=%zu\n", reset_stage, ctx->q4_m9216_bos_initialized ? 1 : 0, ctx->q4_m9216_weight_bos.size());
+            std::fprintf(stderr, "XDNA_RESOURCE_RESET BEFORE instr_reset\n"); ctx->q4_m9216_bo_instr.reset(); std::fprintf(stderr, "XDNA_RESOURCE_RESET AFTER instr_reset\n");
+            std::fprintf(stderr, "XDNA_RESOURCE_RESET BEFORE q4_reset\n"); ctx->q4_m9216_bo_q4.reset(); std::fprintf(stderr, "XDNA_RESOURCE_RESET AFTER q4_reset\n");
+            std::fprintf(stderr, "XDNA_RESOURCE_RESET BEFORE q8_reset\n"); ctx->q4_m9216_bo_q8.reset(); std::fprintf(stderr, "XDNA_RESOURCE_RESET AFTER q8_reset\n");
+            std::fprintf(stderr, "XDNA_RESOURCE_RESET BEFORE out_reset\n"); ctx->q4_m9216_bo_out.reset(); std::fprintf(stderr, "XDNA_RESOURCE_RESET AFTER out_reset\n");
             ctx->q4_m9216_weight_bos.clear();
             ctx->q4_m9216_bos_initialized = false;
             if (reset_kernel) {
                 const std::string kernel_name = ctx->q4_m9216_kernel->get_name();
-                std::fprintf(stderr, "BQ1 BEFORE kernel_reset\n"); ctx->q4_m9216_kernel.reset(); std::fprintf(stderr, "BQ1 AFTER kernel_reset\n");
-                if (reset_context) { std::fprintf(stderr, "BQ1 BEFORE hw_context_reset\n"); ctx->q4_m9216_hw_context.reset(); std::fprintf(stderr, "BQ1 AFTER hw_context_reset\n"); }
-                if (reset_xclbin) { std::fprintf(stderr, "BQ1 BEFORE xclbin_reset\n"); ctx->q4_m9216_xclbin.reset(); std::fprintf(stderr, "BQ1 AFTER xclbin_reset\n"); ctx->q4_m9216_xclbin = std::make_shared<xrt::xclbin>(ctx->q4_m9216_xclbin_path); device.register_xclbin(*ctx->q4_m9216_xclbin); std::fprintf(stderr, "BQ1 xclbin_recreated uuid=%s\n", ctx->q4_m9216_xclbin->get_uuid().to_string().c_str()); }
-                if (reset_context) { ctx->q4_m9216_hw_context = std::make_shared<xrt::hw_context>(device, ctx->q4_m9216_xclbin->get_uuid()); ctx->m9216_hw_context_generation = ggml_backend_xdna_a7c_new_resource_generation(ctx); }
+                std::fprintf(stderr, "XDNA_RESOURCE_RESET BEFORE kernel_reset\n"); ctx->q4_m9216_kernel.reset(); std::fprintf(stderr, "XDNA_RESOURCE_RESET AFTER kernel_reset\n");
+                if (reset_context) { std::fprintf(stderr, "XDNA_RESOURCE_RESET BEFORE hw_context_reset\n"); ctx->q4_m9216_hw_context.reset(); std::fprintf(stderr, "XDNA_RESOURCE_RESET AFTER hw_context_reset\n"); }
+                if (reset_xclbin) { std::fprintf(stderr, "XDNA_RESOURCE_RESET BEFORE xclbin_reset\n"); ctx->q4_m9216_xclbin.reset(); std::fprintf(stderr, "XDNA_RESOURCE_RESET AFTER xclbin_reset\n"); ctx->q4_m9216_xclbin = std::make_shared<xrt::xclbin>(ctx->q4_m9216_xclbin_path); device.register_xclbin(*ctx->q4_m9216_xclbin); std::fprintf(stderr, "XDNA_RESOURCE_RESET xclbin_recreated uuid=%s\n", ctx->q4_m9216_xclbin->get_uuid().to_string().c_str()); }
+                if (reset_context) { ctx->q4_m9216_hw_context = std::make_shared<xrt::hw_context>(device, ctx->q4_m9216_xclbin->get_uuid()); ctx->m9216_hw_context_generation = ggml_backend_xdna_new_resource_generation(ctx); }
                 ctx->q4_m9216_kernel = std::make_unique<xrt::kernel>(*ctx->q4_m9216_hw_context, kernel_name);
-                ctx->m9216_kernel_generation = ggml_backend_xdna_a7c_new_resource_generation(ctx);
-                std::fprintf(stderr, "BQ1 RECREATE stage=%s kernel=%p hw_context=%p groups=%u,%u,%u,%u\n", bq1_stage, static_cast<void *>(ctx->q4_m9216_kernel.get()), static_cast<void *>(ctx->q4_m9216_hw_context.get()), ctx->q4_m9216_kernel->group_id(1), ctx->q4_m9216_kernel->group_id(3), ctx->q4_m9216_kernel->group_id(4), ctx->q4_m9216_kernel->group_id(5));
+                ctx->m9216_kernel_generation = ggml_backend_xdna_new_resource_generation(ctx);
+                std::fprintf(stderr, "XDNA_RESOURCE_RESET RECREATE stage=%s kernel=%p hw_context=%p groups=%u,%u,%u,%u\n", reset_stage, static_cast<void *>(ctx->q4_m9216_kernel.get()), static_cast<void *>(ctx->q4_m9216_hw_context.get()), ctx->q4_m9216_kernel->group_id(1), ctx->q4_m9216_kernel->group_id(3), ctx->q4_m9216_kernel->group_id(4), ctx->q4_m9216_kernel->group_id(5));
             }
         }
         if (recreate_bundle) {
@@ -3678,10 +3678,10 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
             ctx->q4_m9216_hw_context.reset();
             device.register_xclbin(*ctx->q4_m9216_xclbin);
             ctx->q4_m9216_hw_context = std::make_shared<xrt::hw_context>(device, ctx->q4_m9216_xclbin->get_uuid());
-            ctx->m9216_hw_context_generation = ggml_backend_xdna_a7c_new_resource_generation(ctx);
+            ctx->m9216_hw_context_generation = ggml_backend_xdna_new_resource_generation(ctx);
             ctx->q4_m9216_kernel = std::make_unique<xrt::kernel>(*ctx->q4_m9216_hw_context, kernel_name);
-            ctx->m9216_kernel_generation = ggml_backend_xdna_a7c_new_resource_generation(ctx);
-            std::fprintf(stderr, "BN1 BUNDLE_RECREATE ordinal=9 kernel=%p hw_context=%p groups=%u,%u,%u,%u\n", static_cast<void *>(ctx->q4_m9216_kernel.get()), static_cast<void *>(ctx->q4_m9216_hw_context.get()), ctx->q4_m9216_kernel->group_id(1), ctx->q4_m9216_kernel->group_id(3), ctx->q4_m9216_kernel->group_id(4), ctx->q4_m9216_kernel->group_id(5));
+            ctx->m9216_kernel_generation = ggml_backend_xdna_new_resource_generation(ctx);
+            std::fprintf(stderr, "XDNA_BUNDLE_RECREATE ordinal=9 kernel=%p hw_context=%p groups=%u,%u,%u,%u\n", static_cast<void *>(ctx->q4_m9216_kernel.get()), static_cast<void *>(ctx->q4_m9216_hw_context.get()), ctx->q4_m9216_kernel->group_id(1), ctx->q4_m9216_kernel->group_id(3), ctx->q4_m9216_kernel->group_id(4), ctx->q4_m9216_kernel->group_id(5));
         }
 #endif
         xrt::kernel & kernel =
@@ -3748,7 +3748,7 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
                 ctx->q4_m9216_instructions.data(),
                 instruction_bytes);
 
-            // LLAMA-XDNA-K2560-INTEGRATION-A1: mandatory host ordering rule.
+            // K=2560 integration: mandatory host ordering rule.
             ggml_backend_xdna_sync_host_written_bo(
                 *bo_instr,
                 "K=2560 M=9216 instruction BO (CACHEABLE)");
@@ -3777,10 +3777,10 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
             ctx->q4_m9216_buf_out =
                 buf_out;
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-            ctx->m9216_instruction_bo_generation = ggml_backend_xdna_a7c_new_resource_generation(ctx);
-            ctx->m9216_shared_q4_bo_generation = ggml_backend_xdna_a7c_new_resource_generation(ctx);
-            ctx->m9216_q8_bo_generation = ggml_backend_xdna_a7c_new_resource_generation(ctx);
-            ctx->m9216_output_bo_generation = ggml_backend_xdna_a7c_new_resource_generation(ctx);
+            ctx->m9216_instruction_bo_generation = ggml_backend_xdna_new_resource_generation(ctx);
+            ctx->m9216_shared_q4_bo_generation = ggml_backend_xdna_new_resource_generation(ctx);
+            ctx->m9216_q8_bo_generation = ggml_backend_xdna_new_resource_generation(ctx);
+            ctx->m9216_output_bo_generation = ggml_backend_xdna_new_resource_generation(ctx);
 #endif
 
             ctx->q4_m9216_instruction_count =
@@ -3807,7 +3807,7 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
         ggml_backend_xdna_diagnostic_capture_payload(capture_index, "instructions.bin", ctx->q4_m9216_instructions.data(), instruction_bytes);
 #endif
 
-        // LLAMA-XDNA-Q4K-PERSISTENT-WEIGHTS-A1: prefer this tensor's own
+        // persistent Q4_K weights: prefer this tensor's own
         // persistent, already-filled, already-synced BO.  nullptr means the
         // existing shared BO + per-call convert/sync path below is used.
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
@@ -3862,7 +3862,7 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
         if (ggml_backend_xdna_diagnostic_capture_payload_enabled()) {
             void * transport = persistent_q4 != nullptr ? persistent_q4->map<void *>() : ctx->q4_m9216_buf_q4;
             ggml_backend_xdna_diagnostic_capture_payload(capture_index, "q4_transport.bin", transport, q4_transport_bytes);
-            std::fprintf(stderr, "BH1 capture index=%llu q4_mode=%s q4_bo=%p mapped=%p\n", static_cast<unsigned long long>(capture_index), persistent_q4 != nullptr ? "persistent" : "shared", static_cast<void *>(persistent_q4), transport);
+            std::fprintf(stderr, "XDNA_PAYLOAD capture index=%llu q4_mode=%s q4_bo=%p mapped=%p\n", static_cast<unsigned long long>(capture_index), persistent_q4 != nullptr ? "persistent" : "shared", static_cast<void *>(persistent_q4), transport);
         }
 #endif
         {
@@ -3891,21 +3891,21 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
         }
 
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-        if (ctx->a7f_q4_control_enabled && capture_index == 8 && persistent_q4 != nullptr) {
-            std::fprintf(stderr, "A7F_ONLY_Q4_TRANSPORT_BYTES_CHANGED=NO reason=persistent_q4_in_use\n");
+        if (ctx->q4_control_enabled && capture_index == 8 && persistent_q4 != nullptr) {
+            std::fprintf(stderr, "XDNA_Q4_CONTROL_ONLY_TRANSPORT_BYTES_CHANGED=NO reason=persistent_q4_in_use\n");
             return false;
         }
 #endif
         if (persistent_q4 == nullptr) {
             GGML_XDNA_DIAG_ONLY(const auto t0 = std::chrono::steady_clock::now();)
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-            if (a7c_ordinal8_target) ggml_backend_xdna_m9216_digest(ctx->q4_m9216_buf_q4, q4_transport_bytes, q4_transport_sha);
+            if (trace_ordinal8_target) ggml_backend_xdna_m9216_digest(ctx->q4_m9216_buf_q4, q4_transport_bytes, q4_transport_sha);
 #endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-            if (ctx->a7f_q4_control_enabled && capture_index == 8) {
+            if (ctx->q4_control_enabled && capture_index == 8) {
                 char snapshot_sha_check[65];
                 char substituted_sha[65];
-                ggml_backend_xdna_m9216_digest(ctx->a7f_q4_control_snapshot.get(), q4_transport_bytes, snapshot_sha_check);
+                ggml_backend_xdna_m9216_digest(ctx->q4_control_snapshot.get(), q4_transport_bytes, snapshot_sha_check);
                 const uint64_t current_generations[7] = {
                     ctx->m9216_hw_context_generation, ctx->m9216_kernel_generation,
                     ctx->m9216_instruction_bo_generation, ctx->m9216_shared_q4_bo_generation,
@@ -3915,7 +3915,7 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
                     ctx->q4_m9216_hw_context.get(), ctx->q4_m9216_kernel.get(), ctx->q4_m9216_bo_instr.get(),
                     ctx->q4_m9216_bo_q4.get(), ctx->q4_m9216_bo_q8.get(), ctx->q4_m9216_bo_out.get(), nullptr,
                 };
-                std::fprintf(stderr, "A7F_Q4_CONTROL_ORIGINAL_ORD8 backend_instance_id=%llu correlation_id=%llu xrt_seq=%llu ordinal=8 node=ffn_up-3 bytes=%zu offset=0 original_sha256=%s q8_sha256=%s instruction_sha256=%s xclbin_identity=%p kernel=%p hw_context=%p instruction_bo=%p shared_q4_bo=%p q8_bo=%p output_bo=%p hw_context_gen=%llu kernel_gen=%llu instruction_bo_gen=%llu shared_q4_bo_gen=%llu q8_bo_gen=%llu output_bo_gen=%llu persistent_q4_bo_gen=0\n",
+                std::fprintf(stderr, "XDNA_Q4_CONTROL_ORIGINAL_ORD8 backend_instance_id=%llu correlation_id=%llu xrt_seq=%llu ordinal=8 node=ffn_up-3 bytes=%zu offset=0 original_sha256=%s q8_sha256=%s instruction_sha256=%s xclbin_identity=%p kernel=%p hw_context=%p instruction_bo=%p shared_q4_bo=%p q8_bo=%p output_bo=%p hw_context_gen=%llu kernel_gen=%llu instruction_bo_gen=%llu shared_q4_bo_gen=%llu q8_bo_gen=%llu output_bo_gen=%llu persistent_q4_bo_gen=0\n",
                     static_cast<unsigned long long>(ctx->backend_instance_id),
                     static_cast<unsigned long long>(submission_sequence_id), static_cast<unsigned long long>(trace_sequence_id + 1),
                     q4_transport_bytes, q4_transport_sha, q8_sha, instruction_sha,
@@ -3926,39 +3926,39 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
                     static_cast<unsigned long long>(current_generations[0]), static_cast<unsigned long long>(current_generations[1]),
                     static_cast<unsigned long long>(current_generations[2]), static_cast<unsigned long long>(current_generations[3]),
                     static_cast<unsigned long long>(current_generations[4]), static_cast<unsigned long long>(current_generations[5]));
-                const bool invariant_gate = ctx->a7f_q4_control_snapshot_valid &&
-                    ctx->a7f_q4_control_snapshot != nullptr && ctx->a7f_q4_control_snapshot_bytes == q4_transport_bytes &&
-                    q4_transport_bytes == 14008320 && std::strcmp(snapshot_sha_check, ctx->a7f_q4_control_snapshot_sha256) == 0 &&
-                    ctx->a7f_q4_source_backend_id == ctx->backend_instance_id &&
-                    ctx->a7f_q4_source_correlation_id + 1 == submission_sequence_id &&
-                    ctx->a7f_q4_source_xrt_sequence == trace_sequence_id &&
-                    ctx->a7f_q4_source_xclbin_identity == ctx->q4_m9216_xclbin.get() &&
+                const bool invariant_gate = ctx->q4_control_snapshot_valid &&
+                    ctx->q4_control_snapshot != nullptr && ctx->q4_control_snapshot_bytes == q4_transport_bytes &&
+                    q4_transport_bytes == 14008320 && std::strcmp(snapshot_sha_check, ctx->q4_control_snapshot_sha256) == 0 &&
+                    ctx->q4_control_source_backend_id == ctx->backend_instance_id &&
+                    ctx->q4_control_source_correlation_id + 1 == submission_sequence_id &&
+                    ctx->q4_control_source_xrt_sequence == trace_sequence_id &&
+                    ctx->q4_control_source_xclbin_identity == ctx->q4_m9216_xclbin.get() &&
                     current_objects[0] != nullptr && current_objects[1] != nullptr && current_objects[2] != nullptr &&
                     current_objects[3] != nullptr && current_objects[4] != nullptr && current_objects[5] != nullptr &&
-                    std::memcmp(current_generations, ctx->a7f_q4_source_generations, sizeof(current_generations)) == 0 &&
-                    std::memcmp(current_objects, ctx->a7f_q4_source_objects, sizeof(current_objects)) == 0 &&
+                    std::memcmp(current_generations, ctx->q4_control_source_generations, sizeof(current_generations)) == 0 &&
+                    std::memcmp(current_objects, ctx->q4_control_source_objects, sizeof(current_objects)) == 0 &&
                     current_generations[0] == 1 && current_generations[1] == 2 && current_generations[2] == 3 &&
                     current_generations[3] == 4 && current_generations[4] == 5 && current_generations[5] == 6 && current_generations[6] == 0 &&
-                    std::strcmp(instruction_sha, ctx->a7f_q4_source_instruction_sha256) == 0 &&
+                    std::strcmp(instruction_sha, ctx->q4_control_source_instruction_sha256) == 0 &&
                     std::strcmp(q8_sha, "680d8fe1d964eea065bc4efd261feaa7798143fef06d2930f6f18ef19e473078") == 0 &&
                     std::strcmp(instruction_sha, "3e0afc787e75aa706198fdf40f0cc96e5a7f9ed1d900fcdb6dd42e3499bb68d3") == 0 &&
                     std::strcmp(q4_transport_sha, "2c0e3b517d76ad7619fadf6d345f9e04be0dec1356e9216fa922f237c6ef86f5") == 0 &&
-                    std::strcmp(q4_transport_sha, ctx->a7f_q4_control_snapshot_sha256) != 0 &&
+                    std::strcmp(q4_transport_sha, ctx->q4_control_snapshot_sha256) != 0 &&
                     persistent_q4 == nullptr && replay_q4_path == nullptr && replay_q8_path == nullptr &&
                     !ctx->q4_cache.enabled && !ctx->q4_weight_bo_enabled &&
                     node_name != nullptr && std::strcmp(node_name, "ffn_up-3") == 0 && rows == 9216 && k == 2560 && rhs == 1;
                 if (!invariant_gate) {
-                    std::fprintf(stderr, "A7F_ONLY_Q4_TRANSPORT_BYTES_CHANGED=NO reason=invariant_gate\n");
-                    std::fprintf(stderr, "A7F_Q4_CONTROL_ABORT reason=invariant_gate\n");
+                    std::fprintf(stderr, "XDNA_Q4_CONTROL_ONLY_TRANSPORT_BYTES_CHANGED=NO reason=invariant_gate\n");
+                    std::fprintf(stderr, "XDNA_Q4_CONTROL_ABORT reason=invariant_gate\n");
                     return false;
                 }
-                std::memcpy(ctx->q4_m9216_buf_q4, ctx->a7f_q4_control_snapshot.get(), q4_transport_bytes);
+                std::memcpy(ctx->q4_m9216_buf_q4, ctx->q4_control_snapshot.get(), q4_transport_bytes);
                 ggml_backend_xdna_m9216_digest(ctx->q4_m9216_buf_q4, q4_transport_bytes, substituted_sha);
-                const bool digest_equal = std::strcmp(substituted_sha, ctx->a7f_q4_control_snapshot_sha256) == 0;
-                std::fprintf(stderr, "A7F_Q4_CONTROL_SUBSTITUTED backend_instance_id=%llu correlation_id=%llu xrt_seq=%llu source_ordinal=7 target_ordinal=8 source_sha256=%s substituted_sha256=%s equality=%s bytes=%zu offset=0 q8_sha256=%s instruction_sha256=%s xclbin_identity=%p kernel=%p hw_context=%p instruction_bo=%p shared_q4_bo=%p q8_bo=%p output_bo=%p hw_context_gen=%llu kernel_gen=%llu instruction_bo_gen=%llu shared_q4_bo_gen=%llu q8_bo_gen=%llu output_bo_gen=%llu persistent_q4_bo_gen=0\n",
+                const bool digest_equal = std::strcmp(substituted_sha, ctx->q4_control_snapshot_sha256) == 0;
+                std::fprintf(stderr, "XDNA_Q4_CONTROL_SUBSTITUTED backend_instance_id=%llu correlation_id=%llu xrt_seq=%llu source_ordinal=7 target_ordinal=8 source_sha256=%s substituted_sha256=%s equality=%s bytes=%zu offset=0 q8_sha256=%s instruction_sha256=%s xclbin_identity=%p kernel=%p hw_context=%p instruction_bo=%p shared_q4_bo=%p q8_bo=%p output_bo=%p hw_context_gen=%llu kernel_gen=%llu instruction_bo_gen=%llu shared_q4_bo_gen=%llu q8_bo_gen=%llu output_bo_gen=%llu persistent_q4_bo_gen=0\n",
                     static_cast<unsigned long long>(ctx->backend_instance_id),
                     static_cast<unsigned long long>(submission_sequence_id), static_cast<unsigned long long>(trace_sequence_id + 1),
-                    ctx->a7f_q4_control_snapshot_sha256, substituted_sha, digest_equal ? "PASS" : "FAIL",
+                    ctx->q4_control_snapshot_sha256, substituted_sha, digest_equal ? "PASS" : "FAIL",
                     q4_transport_bytes, q8_sha, instruction_sha,
                     static_cast<const void *>(ctx->q4_m9216_xclbin.get()),
                     static_cast<void *>(ctx->q4_m9216_kernel.get()), static_cast<void *>(ctx->q4_m9216_hw_context.get()),
@@ -3968,11 +3968,11 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
                     static_cast<unsigned long long>(current_generations[2]), static_cast<unsigned long long>(current_generations[3]),
                     static_cast<unsigned long long>(current_generations[4]), static_cast<unsigned long long>(current_generations[5]));
                 if (!digest_equal) {
-                    std::fprintf(stderr, "A7F_ONLY_Q4_TRANSPORT_BYTES_CHANGED=NO reason=post_copy_digest_mismatch\n");
+                    std::fprintf(stderr, "XDNA_Q4_CONTROL_ONLY_TRANSPORT_BYTES_CHANGED=NO reason=post_copy_digest_mismatch\n");
                     return false;
                 }
                 std::memcpy(q4_transport_sha, substituted_sha, sizeof(q4_transport_sha));
-                std::fprintf(stderr, "A7F_ONLY_Q4_TRANSPORT_BYTES_CHANGED=YES ordinal=8 correlation_id=%llu xrt_seq=%llu q8_sha256=%s shared_q4_bo_generation=%llu\n",
+                std::fprintf(stderr, "XDNA_Q4_CONTROL_ONLY_TRANSPORT_BYTES_CHANGED=YES ordinal=8 correlation_id=%llu xrt_seq=%llu q8_sha256=%s shared_q4_bo_generation=%llu\n",
                     static_cast<unsigned long long>(submission_sequence_id), static_cast<unsigned long long>(trace_sequence_id + 1),
                     q8_sha, static_cast<unsigned long long>(ctx->m9216_shared_q4_bo_generation));
             }
@@ -3985,7 +3985,7 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
 
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
         if (std::getenv("GGML_XDNA_BO_FORENSICS") != nullptr) {
-            std::fprintf(stderr, "BL1 BO backend_id=%llu m9216_index=%llu instr_obj=%p instr_addr=0x%llx instr_size=%zu instr_group=%u q4_obj=%p q4_addr=0x%llx q4_size=%zu q4_group=%u q8_obj=%p q8_addr=0x%llx q8_size=%zu q8_group=%u out_obj=%p out_addr=0x%llx out_size=%zu out_group=%u persistent_q4_count=%zu persistent_q4_bytes=%zu\n",
+            std::fprintf(stderr, "XDNA_BUFFER_OBJECT BO backend_id=%llu m9216_index=%llu instr_obj=%p instr_addr=0x%llx instr_size=%zu instr_group=%u q4_obj=%p q4_addr=0x%llx q4_size=%zu q4_group=%u q8_obj=%p q8_addr=0x%llx q8_size=%zu q8_group=%u out_obj=%p out_addr=0x%llx out_size=%zu out_group=%u persistent_q4_count=%zu persistent_q4_bytes=%zu\n",
                 static_cast<unsigned long long>(ctx->backend_instance_id), static_cast<unsigned long long>(capture_index),
                 static_cast<void *>(ctx->q4_m9216_bo_instr.get()), static_cast<unsigned long long>(ctx->q4_m9216_bo_instr->address()), instruction_bytes, ctx->q4_m9216_kernel->group_id(1),
                 static_cast<void *>(&bo_q4), static_cast<unsigned long long>(bo_q4.address()), q4_transport_bytes, ctx->q4_m9216_kernel->group_id(3),
@@ -4029,8 +4029,8 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             ++trace_sequence_id;
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-            if (a7c_ordinal8_target) {
-                std::fprintf(stderr, "A7C_Q4_TRANSPORT_SHA256 backend_id=%llu ordinal=%llu correlation_id=%llu xrt_seq=%llu node=%s node_index=%d M=9216 K=2560 RHS=1 bo_generation=%llu bytes=%zu offset=0 sha256=%s\n",
+            if (trace_ordinal8_target) {
+                std::fprintf(stderr, "XDNA_TRACE_Q4_TRANSPORT_SHA256 backend_id=%llu ordinal=%llu correlation_id=%llu xrt_seq=%llu node=%s node_index=%d M=9216 K=2560 RHS=1 bo_generation=%llu bytes=%zu offset=0 sha256=%s\n",
                     static_cast<unsigned long long>(ctx->backend_instance_id), static_cast<unsigned long long>(capture_index),
                     static_cast<unsigned long long>(submission_sequence_id), static_cast<unsigned long long>(trace_sequence_id), node_name, graph_node_index,
                     static_cast<unsigned long long>(ctx->m9216_shared_q4_bo_generation), q4_transport_bytes,
@@ -4040,7 +4040,7 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
 #endif
             #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             if (std::getenv("GGML_XDNA_XRT_SEQUENCE_TRACE") != nullptr) {
-                std::fprintf(stderr, "BG1 XRT seq=%llu backend_id=%llu BEFORE kernel shape=M9216 node=m9216 opcode=3 K=2560 rhs=1 instr_bytes=%zu instr_count=%u kernel=%p hw_context=%p group_ids=%u,%u,%u,%u persistent_q4=%p q4_bos_initialized=%d\n",
+                std::fprintf(stderr, "XDNA_XRT_SEQUENCE seq=%llu backend_id=%llu BEFORE kernel shape=M9216 node=m9216 opcode=3 K=2560 rhs=1 instr_bytes=%zu instr_count=%u kernel=%p hw_context=%p group_ids=%u,%u,%u,%u persistent_q4=%p q4_bos_initialized=%d\n",
                     static_cast<unsigned long long>(trace_sequence_id), static_cast<unsigned long long>(ctx->backend_instance_id), instruction_bytes, instruction_count,
                     static_cast<void *>(ctx->q4_m9216_kernel.get()), static_cast<void *>(ctx->q4_m9216_hw_context.get()),
                     ctx->q4_m9216_kernel->group_id(1), ctx->q4_m9216_kernel->group_id(3), ctx->q4_m9216_kernel->group_id(4), ctx->q4_m9216_kernel->group_id(5),
@@ -4054,8 +4054,8 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
                 const std::string kernel_name = ctx->q4_m9216_kernel->get_name();
                 ctx->q4_m9216_kernel.reset();
                 ctx->q4_m9216_kernel = std::make_unique<xrt::kernel>(*ctx->q4_m9216_hw_context, kernel_name);
-                ctx->m9216_kernel_generation = ggml_backend_xdna_a7c_new_resource_generation(ctx);
-                std::fprintf(stderr, "BM1 RECREATE kernel ordinal=9 kernel=%p hw_context=%p group_ids=%u,%u,%u,%u\n", static_cast<void *>(ctx->q4_m9216_kernel.get()), static_cast<void *>(ctx->q4_m9216_hw_context.get()), ctx->q4_m9216_kernel->group_id(1), ctx->q4_m9216_kernel->group_id(3), ctx->q4_m9216_kernel->group_id(4), ctx->q4_m9216_kernel->group_id(5));
+                ctx->m9216_kernel_generation = ggml_backend_xdna_new_resource_generation(ctx);
+                std::fprintf(stderr, "XDNA_RUN_STATE RECREATE kernel ordinal=9 kernel=%p hw_context=%p group_ids=%u,%u,%u,%u\n", static_cast<void *>(ctx->q4_m9216_kernel.get()), static_cast<void *>(ctx->q4_m9216_hw_context.get()), ctx->q4_m9216_kernel->group_id(1), ctx->q4_m9216_kernel->group_id(3), ctx->q4_m9216_kernel->group_id(4), ctx->q4_m9216_kernel->group_id(5));
             }
 #endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
@@ -4070,8 +4070,8 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
                 q4_rows, activations, ctx->q4_m9216_buf_q8,
                 ctx->q4_m9216_kernel.get(), ctx->q4_m9216_hw_context.get(),
                 ctx->q4_m9216_bo_instr.get(), &bo_q4, &bo_q8, &bo_out);
-            if (a7c_ordinal8_target) std::fprintf(stderr,
-                "A7C_RESOURCE_GENERATIONS backend_id=%llu ordinal=%llu correlation_id=%llu xrt_seq=%llu node=%s node_index=%d M=9216 K=2560 RHS=1 hw_context_gen=%llu kernel_gen=%llu instruction_bo_gen=%llu shared_q4_bo_gen=%llu q8_bo_gen=%llu output_bo_gen=%llu persistent_q4_bo_gen=%llu persistent_q4=%s command_identity=HOST_CORRELATION_ONLY\n",
+            if (trace_ordinal8_target) std::fprintf(stderr,
+                "XDNA_TRACE_RESOURCE_GENERATIONS backend_id=%llu ordinal=%llu correlation_id=%llu xrt_seq=%llu node=%s node_index=%d M=9216 K=2560 RHS=1 hw_context_gen=%llu kernel_gen=%llu instruction_bo_gen=%llu shared_q4_bo_gen=%llu q8_bo_gen=%llu output_bo_gen=%llu persistent_q4_bo_gen=%llu persistent_q4=%s command_identity=HOST_CORRELATION_ONLY\n",
                 static_cast<unsigned long long>(ctx->backend_instance_id), static_cast<unsigned long long>(capture_index),
                 static_cast<unsigned long long>(submission_sequence_id), static_cast<unsigned long long>(trace_sequence_id), node_name, graph_node_index,
                 static_cast<unsigned long long>(ctx->m9216_hw_context_generation), static_cast<unsigned long long>(ctx->m9216_kernel_generation),
@@ -4081,12 +4081,12 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
 #endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             std::fprintf(stderr, "ggml_xdna: M9216_BOUNDARY_BEFORE_KERNEL_CALL\n");
-            if (a7c_ordinal8_target) a7c_offline_pre = ggml_backend_xdna_a7c_log_offline(
-                ctx, "A7C_DEVICE_OFFLINE_PRE_KERNEL", capture_index, submission_sequence_id,
+            if (trace_ordinal8_target) trace_offline_pre = ggml_backend_xdna_log_offline(
+                ctx, "XDNA_TRACE_DEVICE_OFFLINE_PRE_KERNEL", capture_index, submission_sequence_id,
                 trace_sequence_id, node_name, graph_node_index);
 #endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-            const uint64_t a7c_kernel_start_ns = a7c_ordinal8_target ? ggml_backend_xdna_a7c_elapsed_ns(ctx) : 0;
+            const uint64_t trace_kernel_start_ns = trace_ordinal8_target ? ggml_backend_xdna_elapsed_ns(ctx) : 0;
 #endif
             auto run = kernel(
                 opcode,
@@ -4096,14 +4096,14 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
                 bo_q8,
                 bo_out);
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-            if (a7c_ordinal8_target) {
-                const uint64_t a7c_kernel_end_ns = ggml_backend_xdna_a7c_elapsed_ns(ctx);
-                a7c_kernel_ns = a7c_kernel_end_ns - a7c_kernel_start_ns;
-                std::fprintf(stderr, "A7C_TIMING_KERNEL_CALL backend_id=%llu ordinal=%llu correlation_id=%llu xrt_seq=%llu node=%s node_index=%d start_elapsed_ns=%llu end_elapsed_ns=%llu duration_ns=%llu\n",
+            if (trace_ordinal8_target) {
+                const uint64_t trace_kernel_end_ns = ggml_backend_xdna_elapsed_ns(ctx);
+                trace_kernel_ns = trace_kernel_end_ns - trace_kernel_start_ns;
+                std::fprintf(stderr, "XDNA_TRACE_TIMING_KERNEL_CALL backend_id=%llu ordinal=%llu correlation_id=%llu xrt_seq=%llu node=%s node_index=%d start_elapsed_ns=%llu end_elapsed_ns=%llu duration_ns=%llu\n",
                     static_cast<unsigned long long>(ctx->backend_instance_id), static_cast<unsigned long long>(capture_index),
                     static_cast<unsigned long long>(submission_sequence_id), static_cast<unsigned long long>(trace_sequence_id), node_name, graph_node_index,
-                    static_cast<unsigned long long>(a7c_kernel_start_ns), static_cast<unsigned long long>(a7c_kernel_end_ns),
-                    static_cast<unsigned long long>(a7c_kernel_ns));
+                    static_cast<unsigned long long>(trace_kernel_start_ns), static_cast<unsigned long long>(trace_kernel_end_ns),
+                    static_cast<unsigned long long>(trace_kernel_ns));
             }
 #endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
@@ -4118,30 +4118,30 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
             GGML_XDNA_DIAG_ONLY(++ctx->run_constructed;)
             GGML_XDNA_DIAG_ONLY(++ctx->run_live;)
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-            if (std::getenv("GGML_XDNA_RUN_STATE_TRACE") != nullptr) std::fprintf(stderr, "BM1 RUN constructed ordinal=%llu node=m9216 run=%p kernel=%p hw_context=%p thread=%zu live=%llu constructed=%llu completed=%llu destroyed=%llu native_handle=UNAVAILABLE\n", static_cast<unsigned long long>(capture_index), static_cast<void *>(&run), static_cast<void *>(ctx->q4_m9216_kernel.get()), static_cast<void *>(ctx->q4_m9216_hw_context.get()), std::hash<std::thread::id>{}(std::this_thread::get_id()), static_cast<unsigned long long>(ctx->run_live), static_cast<unsigned long long>(ctx->run_constructed), static_cast<unsigned long long>(ctx->run_completed), static_cast<unsigned long long>(ctx->run_destroyed));
+            if (std::getenv("GGML_XDNA_RUN_STATE_TRACE") != nullptr) std::fprintf(stderr, "XDNA_RUN_STATE RUN constructed ordinal=%llu node=m9216 run=%p kernel=%p hw_context=%p thread=%zu live=%llu constructed=%llu completed=%llu destroyed=%llu native_handle=UNAVAILABLE\n", static_cast<unsigned long long>(capture_index), static_cast<void *>(&run), static_cast<void *>(ctx->q4_m9216_kernel.get()), static_cast<void *>(ctx->q4_m9216_hw_context.get()), std::hash<std::thread::id>{}(std::this_thread::get_id()), static_cast<unsigned long long>(ctx->run_live), static_cast<unsigned long long>(ctx->run_constructed), static_cast<unsigned long long>(ctx->run_completed), static_cast<unsigned long long>(ctx->run_destroyed));
 #endif
             #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             if (std::getenv("GGML_XDNA_XRT_SEQUENCE_TRACE") != nullptr) {
-                std::fprintf(stderr, "BG1 XRT seq=%llu AFTER kernel run_created shape=M9216 BO instr=%p q4=%p q8=%p out=%p\n", static_cast<unsigned long long>(trace_sequence_id), static_cast<void *>(ctx->q4_m9216_bo_instr.get()), static_cast<void *>(persistent_q4), static_cast<void *>(ctx->q4_m9216_bo_q8.get()), static_cast<void *>(ctx->q4_m9216_bo_out.get()));
-                std::fprintf(stderr, "BG1 XRT seq=%llu BEFORE run.wait()\n", static_cast<unsigned long long>(trace_sequence_id));
+                std::fprintf(stderr, "XDNA_XRT_SEQUENCE seq=%llu AFTER kernel run_created shape=M9216 BO instr=%p q4=%p q8=%p out=%p\n", static_cast<unsigned long long>(trace_sequence_id), static_cast<void *>(ctx->q4_m9216_bo_instr.get()), static_cast<void *>(persistent_q4), static_cast<void *>(ctx->q4_m9216_bo_q8.get()), static_cast<void *>(ctx->q4_m9216_bo_out.get()));
+                std::fprintf(stderr, "XDNA_XRT_SEQUENCE seq=%llu BEFORE run.wait()\n", static_cast<unsigned long long>(trace_sequence_id));
             }
 #endif
             GGML_XDNA_DIAG_ONLY(timing.submit_ms += std::chrono::duration<double, std::milli>(submit_end - submit_begin).count();)
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-            if (std::getenv("GGML_XDNA_RUN_STATE_TRACE") != nullptr) std::fprintf(stderr, "BM1 RUN BEFORE_WAIT ordinal=%llu run=%p thread=%zu live=%llu\n", static_cast<unsigned long long>(capture_index), static_cast<void *>(&run), std::hash<std::thread::id>{}(std::this_thread::get_id()), static_cast<unsigned long long>(ctx->run_live));
+            if (std::getenv("GGML_XDNA_RUN_STATE_TRACE") != nullptr) std::fprintf(stderr, "XDNA_RUN_STATE RUN BEFORE_WAIT ordinal=%llu run=%p thread=%zu live=%llu\n", static_cast<unsigned long long>(capture_index), static_cast<void *>(&run), std::hash<std::thread::id>{}(std::this_thread::get_id()), static_cast<unsigned long long>(ctx->run_live));
 #endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-            const uint64_t a7c_state_start_ns = a7c_ordinal8_target ? ggml_backend_xdna_a7c_elapsed_ns(ctx) : 0;
+            const uint64_t trace_state_start_ns = trace_ordinal8_target ? ggml_backend_xdna_elapsed_ns(ctx) : 0;
             const ert_cmd_state state_before_wait = run.state();
-            const uint64_t a7c_state_end_ns = a7c_ordinal8_target ? ggml_backend_xdna_a7c_elapsed_ns(ctx) : 0;
-            a7c_pre_wait_state = state_before_wait;
-            if (a7c_ordinal8_target) {
-                a7c_state_query_ns = a7c_state_end_ns - a7c_state_start_ns;
-                std::fprintf(stderr, "A7C_TIMING_STATE_QUERY backend_id=%llu ordinal=%llu correlation_id=%llu xrt_seq=%llu node=%s node_index=%d start_elapsed_ns=%llu end_elapsed_ns=%llu duration_ns=%llu state=%d:%s\n",
+            const uint64_t trace_state_end_ns = trace_ordinal8_target ? ggml_backend_xdna_elapsed_ns(ctx) : 0;
+            trace_pre_wait_state = state_before_wait;
+            if (trace_ordinal8_target) {
+                trace_state_query_ns = trace_state_end_ns - trace_state_start_ns;
+                std::fprintf(stderr, "XDNA_TRACE_TIMING_STATE_QUERY backend_id=%llu ordinal=%llu correlation_id=%llu xrt_seq=%llu node=%s node_index=%d start_elapsed_ns=%llu end_elapsed_ns=%llu duration_ns=%llu state=%d:%s\n",
                     static_cast<unsigned long long>(ctx->backend_instance_id), static_cast<unsigned long long>(capture_index),
                     static_cast<unsigned long long>(submission_sequence_id), static_cast<unsigned long long>(trace_sequence_id), node_name, graph_node_index,
-                    static_cast<unsigned long long>(a7c_state_start_ns), static_cast<unsigned long long>(a7c_state_end_ns),
-                    static_cast<unsigned long long>(a7c_state_query_ns), static_cast<int>(state_before_wait),
+                    static_cast<unsigned long long>(trace_state_start_ns), static_cast<unsigned long long>(trace_state_end_ns),
+                    static_cast<unsigned long long>(trace_state_query_ns), static_cast<int>(state_before_wait),
                     ggml_backend_xdna_ert_cmd_state_name(state_before_wait));
             }
             std::fprintf(stderr,
@@ -4162,45 +4162,45 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
             std::fprintf(stderr, "ggml_xdna: M9216_BOUNDARY_BEFORE_WAIT\n");
 #endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-            const uint64_t a7c_wait_start_ns = a7c_ordinal8_target ? ggml_backend_xdna_a7c_elapsed_ns(ctx) : 0;
+            const uint64_t trace_wait_start_ns = trace_ordinal8_target ? ggml_backend_xdna_elapsed_ns(ctx) : 0;
             ert_cmd_state completion_state;
             try {
                 completion_state = timed_wait_diag ? ggml_backend_xdna_wait_run(run, std::chrono::milliseconds(1000)) : ggml_backend_xdna_wait_run(run, GGML_XDNA_ERT_WAIT_LIMIT);
             } catch (const std::exception & e) {
-                const uint64_t end_ns = a7c_ordinal8_target ? ggml_backend_xdna_a7c_elapsed_ns(ctx) : 0;
-                a7c_wait_ns = end_ns - a7c_wait_start_ns;
-                if (a7c_ordinal8_target) std::fprintf(stderr,
-                    "A7C_TIMING_WAIT backend_id=%llu ordinal=%llu correlation_id=%llu xrt_seq=%llu node=%s node_index=%d start_elapsed_ns=%llu end_elapsed_ns=%llu duration_ns=%llu result=exception category=std_exception error=%s\n",
+                const uint64_t end_ns = trace_ordinal8_target ? ggml_backend_xdna_elapsed_ns(ctx) : 0;
+                trace_wait_ns = end_ns - trace_wait_start_ns;
+                if (trace_ordinal8_target) std::fprintf(stderr,
+                    "XDNA_TRACE_TIMING_WAIT backend_id=%llu ordinal=%llu correlation_id=%llu xrt_seq=%llu node=%s node_index=%d start_elapsed_ns=%llu end_elapsed_ns=%llu duration_ns=%llu result=exception category=std_exception error=%s\n",
                     static_cast<unsigned long long>(ctx->backend_instance_id), static_cast<unsigned long long>(capture_index),
                     static_cast<unsigned long long>(submission_sequence_id), static_cast<unsigned long long>(trace_sequence_id), node_name, graph_node_index,
-                    static_cast<unsigned long long>(a7c_wait_start_ns), static_cast<unsigned long long>(end_ns),
-                    static_cast<unsigned long long>(a7c_wait_ns), e.what());
+                    static_cast<unsigned long long>(trace_wait_start_ns), static_cast<unsigned long long>(end_ns),
+                    static_cast<unsigned long long>(trace_wait_ns), e.what());
                 throw;
             } catch (...) {
-                const uint64_t end_ns = a7c_ordinal8_target ? ggml_backend_xdna_a7c_elapsed_ns(ctx) : 0;
-                a7c_wait_ns = end_ns - a7c_wait_start_ns;
-                if (a7c_ordinal8_target) std::fprintf(stderr,
-                    "A7C_TIMING_WAIT backend_id=%llu ordinal=%llu correlation_id=%llu xrt_seq=%llu node=%s node_index=%d start_elapsed_ns=%llu end_elapsed_ns=%llu duration_ns=%llu result=exception category=unknown\n",
+                const uint64_t end_ns = trace_ordinal8_target ? ggml_backend_xdna_elapsed_ns(ctx) : 0;
+                trace_wait_ns = end_ns - trace_wait_start_ns;
+                if (trace_ordinal8_target) std::fprintf(stderr,
+                    "XDNA_TRACE_TIMING_WAIT backend_id=%llu ordinal=%llu correlation_id=%llu xrt_seq=%llu node=%s node_index=%d start_elapsed_ns=%llu end_elapsed_ns=%llu duration_ns=%llu result=exception category=unknown\n",
                     static_cast<unsigned long long>(ctx->backend_instance_id), static_cast<unsigned long long>(capture_index),
                     static_cast<unsigned long long>(submission_sequence_id), static_cast<unsigned long long>(trace_sequence_id), node_name, graph_node_index,
-                    static_cast<unsigned long long>(a7c_wait_start_ns), static_cast<unsigned long long>(end_ns),
-                    static_cast<unsigned long long>(a7c_wait_ns));
+                    static_cast<unsigned long long>(trace_wait_start_ns), static_cast<unsigned long long>(end_ns),
+                    static_cast<unsigned long long>(trace_wait_ns));
                 throw;
             }
-            const uint64_t a7c_wait_end_ns = a7c_ordinal8_target ? ggml_backend_xdna_a7c_elapsed_ns(ctx) : 0;
-            a7c_wait_returned_state = completion_state;
-            if (a7c_ordinal8_target && completion_state != ERT_CMD_STATE_COMPLETED) {
-                a7c_offline_post = ggml_backend_xdna_a7c_log_offline(
-                    ctx, "A7C_DEVICE_OFFLINE_POST_WAIT", capture_index, submission_sequence_id,
+            const uint64_t trace_wait_end_ns = trace_ordinal8_target ? ggml_backend_xdna_elapsed_ns(ctx) : 0;
+            trace_wait_returned_state = completion_state;
+            if (trace_ordinal8_target && completion_state != ERT_CMD_STATE_COMPLETED) {
+                trace_offline_post = ggml_backend_xdna_log_offline(
+                    ctx, "XDNA_TRACE_DEVICE_OFFLINE_POST_WAIT", capture_index, submission_sequence_id,
                     trace_sequence_id, node_name, graph_node_index);
             }
-            if (a7c_ordinal8_target) {
-                a7c_wait_ns = a7c_wait_end_ns - a7c_wait_start_ns;
-                std::fprintf(stderr, "A7C_TIMING_WAIT backend_id=%llu ordinal=%llu correlation_id=%llu xrt_seq=%llu node=%s node_index=%d start_elapsed_ns=%llu end_elapsed_ns=%llu duration_ns=%llu result=returned state=%d:%s\n",
+            if (trace_ordinal8_target) {
+                trace_wait_ns = trace_wait_end_ns - trace_wait_start_ns;
+                std::fprintf(stderr, "XDNA_TRACE_TIMING_WAIT backend_id=%llu ordinal=%llu correlation_id=%llu xrt_seq=%llu node=%s node_index=%d start_elapsed_ns=%llu end_elapsed_ns=%llu duration_ns=%llu result=returned state=%d:%s\n",
                     static_cast<unsigned long long>(ctx->backend_instance_id), static_cast<unsigned long long>(capture_index),
                     static_cast<unsigned long long>(submission_sequence_id), static_cast<unsigned long long>(trace_sequence_id), node_name, graph_node_index,
-                    static_cast<unsigned long long>(a7c_wait_start_ns), static_cast<unsigned long long>(a7c_wait_end_ns),
-                    static_cast<unsigned long long>(a7c_wait_ns), static_cast<int>(completion_state),
+                    static_cast<unsigned long long>(trace_wait_start_ns), static_cast<unsigned long long>(trace_wait_end_ns),
+                    static_cast<unsigned long long>(trace_wait_ns), static_cast<int>(completion_state),
                     ggml_backend_xdna_ert_cmd_state_name(completion_state));
             }
             std::fprintf(stderr,
@@ -4214,7 +4214,7 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
                 submission_sequence_id, "WAIT_RETURN", capture_index, graph_node_index);
             (void) ggml_backend_xdna_causal_capture_event(causal_sequence_id, "WAIT_RETURN");
             if (timed_wait_diag) {
-                std::fprintf(stderr, "BN1 TIMED_WAIT ordinal=%llu result=%d timeout=%d\n", static_cast<unsigned long long>(capture_index), static_cast<int>(completion_state), completion_state == ERT_CMD_STATE_TIMEOUT ? 1 : 0);
+                std::fprintf(stderr, "XDNA_TIMED_WAIT ordinal=%llu result=%d timeout=%d\n", static_cast<unsigned long long>(capture_index), static_cast<int>(completion_state), completion_state == ERT_CMD_STATE_TIMEOUT ? 1 : 0);
             }
 #else
             const ert_cmd_state completion_state = ggml_backend_xdna_wait_run(run, GGML_XDNA_ERT_WAIT_LIMIT);
@@ -4224,19 +4224,19 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
 #endif
             #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             if (std::getenv("GGML_XDNA_XRT_SEQUENCE_TRACE") != nullptr) {
-                std::fprintf(stderr, "BG1 XRT seq=%llu AFTER run.wait()\n", static_cast<unsigned long long>(trace_sequence_id));
+                std::fprintf(stderr, "XDNA_XRT_SEQUENCE seq=%llu AFTER run.wait()\n", static_cast<unsigned long long>(trace_sequence_id));
             }
 #endif
             if (completion_state != ERT_CMD_STATE_COMPLETED) {
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-                if (a7c_ordinal8_target) {
-                    std::fprintf(stderr, "A7C_TIMING_OUTPUT_SYNC backend_id=%llu ordinal=%llu correlation_id=%llu xrt_seq=%llu node=%s node_index=%d result=not_reached reason=wait_not_COMPLETED\n",
+                if (trace_ordinal8_target) {
+                    std::fprintf(stderr, "XDNA_TRACE_TIMING_OUTPUT_SYNC backend_id=%llu ordinal=%llu correlation_id=%llu xrt_seq=%llu node=%s node_index=%d result=not_reached reason=wait_not_COMPLETED\n",
                         static_cast<unsigned long long>(ctx->backend_instance_id), static_cast<unsigned long long>(capture_index),
                         static_cast<unsigned long long>(submission_sequence_id), static_cast<unsigned long long>(trace_sequence_id), node_name, graph_node_index);
-                    ggml_backend_xdna_a7c_log_correlation(ctx, capture_index, submission_sequence_id, trace_sequence_id,
-                        node_name, graph_node_index, state_before_wait, completion_state, a7c_kernel_ns,
-                        a7c_state_query_ns, a7c_wait_ns, 0, "not_reached", a7c_offline_pre,
-                        a7c_offline_post, persistent_q4_generation, q4_transport_sha, q8_sha);
+                    ggml_backend_xdna_log_correlation(ctx, capture_index, submission_sequence_id, trace_sequence_id,
+                        node_name, graph_node_index, state_before_wait, completion_state, trace_kernel_ns,
+                        trace_state_query_ns, trace_wait_ns, 0, "not_reached", trace_offline_pre,
+                        trace_offline_post, persistent_q4_generation, q4_transport_sha, q8_sha);
                 }
                 GGML_XDNA_DIAG_ONLY(--ctx->run_live;)
                 GGML_XDNA_DIAG_ONLY(++ctx->run_destroyed;)
@@ -4258,7 +4258,7 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
             GGML_XDNA_DIAG_ONLY(--ctx->run_live;)
             GGML_XDNA_DIAG_ONLY(++ctx->run_destroyed;)
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-            if (std::getenv("GGML_XDNA_RUN_STATE_TRACE") != nullptr) std::fprintf(stderr, "BM1 RUN AFTER_WAIT ordinal=%llu run=%p thread=%zu live=%llu completed=%llu destroyed=%llu state=COMPLETED\n", static_cast<unsigned long long>(capture_index), static_cast<void *>(&run), std::hash<std::thread::id>{}(std::this_thread::get_id()), static_cast<unsigned long long>(ctx->run_live), static_cast<unsigned long long>(ctx->run_completed), static_cast<unsigned long long>(ctx->run_destroyed));
+            if (std::getenv("GGML_XDNA_RUN_STATE_TRACE") != nullptr) std::fprintf(stderr, "XDNA_RUN_STATE RUN AFTER_WAIT ordinal=%llu run=%p thread=%zu live=%llu completed=%llu destroyed=%llu state=COMPLETED\n", static_cast<unsigned long long>(capture_index), static_cast<void *>(&run), std::hash<std::thread::id>{}(std::this_thread::get_id()), static_cast<unsigned long long>(ctx->run_live), static_cast<unsigned long long>(ctx->run_completed), static_cast<unsigned long long>(ctx->run_destroyed));
 #endif
             GGML_XDNA_DIAG_ONLY(timing.wait_ms += std::chrono::duration<double, std::milli>(wait_end - wait_begin).count();)
             GGML_XDNA_DIAG_ONLY(++timing.ops;)
@@ -4266,13 +4266,13 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
         }
 
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-        if (std::getenv("GGML_XDNA_RUN_STATE_TRACE") != nullptr) std::fprintf(stderr, "BM1 RUN SCOPE_EXIT ordinal=%llu thread=%zu live=%llu completed=%llu destroyed=%llu\n", static_cast<unsigned long long>(capture_index), std::hash<std::thread::id>{}(std::this_thread::get_id()), static_cast<unsigned long long>(ctx->run_live), static_cast<unsigned long long>(ctx->run_completed), static_cast<unsigned long long>(ctx->run_destroyed));
+        if (std::getenv("GGML_XDNA_RUN_STATE_TRACE") != nullptr) std::fprintf(stderr, "XDNA_RUN_STATE RUN SCOPE_EXIT ordinal=%llu thread=%zu live=%llu completed=%llu destroyed=%llu\n", static_cast<unsigned long long>(capture_index), std::hash<std::thread::id>{}(std::this_thread::get_id()), static_cast<unsigned long long>(ctx->run_live), static_cast<unsigned long long>(ctx->run_completed), static_cast<unsigned long long>(ctx->run_destroyed));
 #endif
         {
             GGML_XDNA_DIAG_ONLY(const auto t0 = std::chrono::steady_clock::now();)
             #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             if (std::getenv("GGML_XDNA_XRT_SEQUENCE_TRACE") != nullptr) {
-                std::fprintf(stderr, "BG1 XRT seq=%llu BEFORE output sync shape=M9216\n", static_cast<unsigned long long>(trace_sequence_id));
+                std::fprintf(stderr, "XDNA_XRT_SEQUENCE seq=%llu BEFORE output sync shape=M9216\n", static_cast<unsigned long long>(trace_sequence_id));
             }
 #endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
@@ -4282,17 +4282,17 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
             std::fprintf(stderr, "ggml_xdna: M9216_BOUNDARY_BEFORE_OUTPUT_SYNC\n");
 #endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-            const uint64_t a7c_output_sync_start_ns = a7c_ordinal8_target ? ggml_backend_xdna_a7c_elapsed_ns(ctx) : 0;
+            const uint64_t trace_output_sync_start_ns = trace_ordinal8_target ? ggml_backend_xdna_elapsed_ns(ctx) : 0;
 #endif
             #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-            if (ctx->a7f_q4_control_enabled && capture_index == 8) {
+            if (ctx->q4_control_enabled && capture_index == 8) {
                 try {
                     bo_out.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
                 } catch (const std::exception & e) {
-                    std::fprintf(stderr, "A7F_Q4_CONTROL_COMPLETED_STOP ordinal=8 output_sync=FAIL result_copy=NOT_REACHED helper_success=NO error=%s\n", e.what());
+                    std::fprintf(stderr, "XDNA_Q4_CONTROL_COMPLETED_STOP ordinal=8 output_sync=FAIL result_copy=NOT_REACHED helper_success=NO error=%s\n", e.what());
                     throw;
                 } catch (...) {
-                    std::fprintf(stderr, "A7F_Q4_CONTROL_COMPLETED_STOP ordinal=8 output_sync=FAIL result_copy=NOT_REACHED helper_success=NO error=unknown\n");
+                    std::fprintf(stderr, "XDNA_Q4_CONTROL_COMPLETED_STOP ordinal=8 output_sync=FAIL result_copy=NOT_REACHED helper_success=NO error=unknown\n");
                     throw;
                 }
             } else
@@ -4302,18 +4302,18 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
             }
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-            if (a7c_ordinal8_target) {
-                const uint64_t a7c_output_sync_end_ns = ggml_backend_xdna_a7c_elapsed_ns(ctx);
-                a7c_output_sync_ns = a7c_output_sync_end_ns - a7c_output_sync_start_ns;
-                std::fprintf(stderr, "A7C_TIMING_OUTPUT_SYNC backend_id=%llu ordinal=%llu correlation_id=%llu xrt_seq=%llu node=%s node_index=%d start_elapsed_ns=%llu end_elapsed_ns=%llu duration_ns=%llu result=returned\n",
+            if (trace_ordinal8_target) {
+                const uint64_t trace_output_sync_end_ns = ggml_backend_xdna_elapsed_ns(ctx);
+                trace_output_sync_ns = trace_output_sync_end_ns - trace_output_sync_start_ns;
+                std::fprintf(stderr, "XDNA_TRACE_TIMING_OUTPUT_SYNC backend_id=%llu ordinal=%llu correlation_id=%llu xrt_seq=%llu node=%s node_index=%d start_elapsed_ns=%llu end_elapsed_ns=%llu duration_ns=%llu result=returned\n",
                     static_cast<unsigned long long>(ctx->backend_instance_id), static_cast<unsigned long long>(capture_index),
                     static_cast<unsigned long long>(submission_sequence_id), static_cast<unsigned long long>(trace_sequence_id), node_name, graph_node_index,
-                    static_cast<unsigned long long>(a7c_output_sync_start_ns), static_cast<unsigned long long>(a7c_output_sync_end_ns),
-                    static_cast<unsigned long long>(a7c_output_sync_ns));
-                ggml_backend_xdna_a7c_log_correlation(ctx, capture_index, submission_sequence_id, trace_sequence_id,
-                    node_name, graph_node_index, a7c_pre_wait_state, a7c_wait_returned_state, a7c_kernel_ns,
-                    a7c_state_query_ns, a7c_wait_ns, a7c_output_sync_ns, "returned",
-                    a7c_offline_pre, a7c_offline_post, persistent_q4_generation, q4_transport_sha, q8_sha);
+                    static_cast<unsigned long long>(trace_output_sync_start_ns), static_cast<unsigned long long>(trace_output_sync_end_ns),
+                    static_cast<unsigned long long>(trace_output_sync_ns));
+                ggml_backend_xdna_log_correlation(ctx, capture_index, submission_sequence_id, trace_sequence_id,
+                    node_name, graph_node_index, trace_pre_wait_state, trace_wait_returned_state, trace_kernel_ns,
+                    trace_state_query_ns, trace_wait_ns, trace_output_sync_ns, "returned",
+                    trace_offline_pre, trace_offline_post, persistent_q4_generation, q4_transport_sha, q8_sha);
             }
 #endif
             ggml_backend_xdna_m9216_correlation_event(
@@ -4323,10 +4323,10 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             std::fprintf(stderr, "ggml_xdna: M9216_BOUNDARY_AFTER_OUTPUT_SYNC\n");
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-            if (ctx->a7f_q4_control_enabled && capture_index == 8) {
+            if (ctx->q4_control_enabled && capture_index == 8) {
                 ++ctx->output_from_device;
                 ctx->timers.output_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-                std::fprintf(stderr, "A7F_Q4_CONTROL_COMPLETED_STOP backend_instance_id=%llu ordinal=8 correlation_id=%llu xrt_seq=%llu wait_state=ERT_CMD_STATE_COMPLETED output_sync=success result_copy=NOT_REACHED helper_success=NO downstream=NO\n",
+                std::fprintf(stderr, "XDNA_Q4_CONTROL_COMPLETED_STOP backend_instance_id=%llu ordinal=8 correlation_id=%llu xrt_seq=%llu wait_state=ERT_CMD_STATE_COMPLETED output_sync=success result_copy=NOT_REACHED helper_success=NO downstream=NO\n",
                     static_cast<unsigned long long>(ctx->backend_instance_id), static_cast<unsigned long long>(submission_sequence_id),
                     static_cast<unsigned long long>(trace_sequence_id));
                 return false;
@@ -4346,7 +4346,7 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
             GGML_XDNA_DIAG_ONLY(const auto t1 = std::chrono::steady_clock::now();)
             #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             if (std::getenv("GGML_XDNA_XRT_SEQUENCE_TRACE") != nullptr) {
-                std::fprintf(stderr, "BG1 XRT seq=%llu AFTER output sync shape=M9216\n", static_cast<unsigned long long>(trace_sequence_id));
+                std::fprintf(stderr, "XDNA_XRT_SEQUENCE seq=%llu AFTER output sync shape=M9216\n", static_cast<unsigned long long>(trace_sequence_id));
             }
 #endif
             GGML_XDNA_DIAG_ONLY(ctx->timers.output_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();)
@@ -4356,48 +4356,48 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
         std::fprintf(stderr, "ggml_xdna: M9216_BOUNDARY_AFTER_RESULT_COPY\n");
 #endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-        if (ctx->a7f_q4_control_enabled && capture_index == 7) {
+        if (ctx->q4_control_enabled && capture_index == 7) {
             const bool capture_preconditions = persistent_q4 == nullptr && replay_q4_path == nullptr &&
                 ctx->q4_m9216_buf_q4 != nullptr && ctx->q4_m9216_bo_q4 != nullptr &&
                 !ctx->q4_cache.enabled && !ctx->q4_weight_bo_enabled &&
-                ctx->a7f_q4_control_snapshot != nullptr &&
-                ctx->a7f_q4_control_snapshot_bytes == q4_transport_bytes &&
+                ctx->q4_control_snapshot != nullptr &&
+                ctx->q4_control_snapshot_bytes == q4_transport_bytes &&
                 q4_transport_bytes == 14008320 && ctx->q4_m9216_xclbin != nullptr;
             if (!capture_preconditions) {
-                std::fprintf(stderr, "A7F_Q4_CONTROL_CAPTURE backend_instance_id=%llu ordinal=7 bytes=%zu offset=0 sha256=NOT_CAPTURED shared_q4_bo_generation=%llu correlation_id=%llu xrt_seq=%llu capture_success=0 reason=source_invariants\n",
+                std::fprintf(stderr, "XDNA_Q4_CONTROL_CAPTURE backend_instance_id=%llu ordinal=7 bytes=%zu offset=0 sha256=NOT_CAPTURED shared_q4_bo_generation=%llu correlation_id=%llu xrt_seq=%llu capture_success=0 reason=source_invariants\n",
                     static_cast<unsigned long long>(ctx->backend_instance_id), q4_transport_bytes,
                     static_cast<unsigned long long>(ctx->m9216_shared_q4_bo_generation),
                     static_cast<unsigned long long>(submission_sequence_id), static_cast<unsigned long long>(trace_sequence_id));
-                std::fprintf(stderr, "A7F_ONLY_Q4_TRANSPORT_BYTES_CHANGED=NO reason=source_invariants\n");
+                std::fprintf(stderr, "XDNA_Q4_CONTROL_ONLY_TRANSPORT_BYTES_CHANGED=NO reason=source_invariants\n");
                 return false;
             }
-            std::memcpy(ctx->a7f_q4_control_snapshot.get(), ctx->q4_m9216_buf_q4, q4_transport_bytes);
-            ggml_backend_xdna_m9216_digest(ctx->a7f_q4_control_snapshot.get(), q4_transport_bytes,
-                ctx->a7f_q4_control_snapshot_sha256);
-            ctx->a7f_q4_source_backend_id = ctx->backend_instance_id;
-            ctx->a7f_q4_source_correlation_id = submission_sequence_id;
-            ctx->a7f_q4_source_xrt_sequence = trace_sequence_id;
-            ctx->a7f_q4_source_generations[0] = ctx->m9216_hw_context_generation;
-            ctx->a7f_q4_source_generations[1] = ctx->m9216_kernel_generation;
-            ctx->a7f_q4_source_generations[2] = ctx->m9216_instruction_bo_generation;
-            ctx->a7f_q4_source_generations[3] = ctx->m9216_shared_q4_bo_generation;
-            ctx->a7f_q4_source_generations[4] = ctx->m9216_q8_bo_generation;
-            ctx->a7f_q4_source_generations[5] = ctx->m9216_output_bo_generation;
-            ctx->a7f_q4_source_generations[6] = 0;
-            ctx->a7f_q4_source_objects[0] = ctx->q4_m9216_hw_context.get();
-            ctx->a7f_q4_source_objects[1] = ctx->q4_m9216_kernel.get();
-            ctx->a7f_q4_source_objects[2] = ctx->q4_m9216_bo_instr.get();
-            ctx->a7f_q4_source_objects[3] = ctx->q4_m9216_bo_q4.get();
-            ctx->a7f_q4_source_objects[4] = ctx->q4_m9216_bo_q8.get();
-            ctx->a7f_q4_source_objects[5] = ctx->q4_m9216_bo_out.get();
-            ctx->a7f_q4_source_objects[6] = nullptr;
-            std::memcpy(ctx->a7f_q4_source_instruction_sha256, instruction_sha, sizeof(instruction_sha));
-            ctx->a7f_q4_source_xclbin_identity = ctx->q4_m9216_xclbin.get();
-            ctx->a7f_q4_control_snapshot_valid = true;
-            std::fprintf(stderr, "A7F_Q4_CONTROL_CAPTURE backend_instance_id=%llu ordinal=7 node=ffn_gate-3 bytes=%zu offset=0 sha256=%s q8_sha256=%s instruction_sha256=%s xclbin_identity=%p kernel=%p hw_context=%p instruction_bo=%p shared_q4_bo=%p q8_bo=%p output_bo=%p hw_context_gen=%llu kernel_gen=%llu instruction_bo_gen=%llu shared_q4_bo_gen=%llu q8_bo_gen=%llu output_bo_gen=%llu persistent_q4_bo_gen=0 correlation_id=%llu xrt_seq=%llu capture_success=1\n",
+            std::memcpy(ctx->q4_control_snapshot.get(), ctx->q4_m9216_buf_q4, q4_transport_bytes);
+            ggml_backend_xdna_m9216_digest(ctx->q4_control_snapshot.get(), q4_transport_bytes,
+                ctx->q4_control_snapshot_sha256);
+            ctx->q4_control_source_backend_id = ctx->backend_instance_id;
+            ctx->q4_control_source_correlation_id = submission_sequence_id;
+            ctx->q4_control_source_xrt_sequence = trace_sequence_id;
+            ctx->q4_control_source_generations[0] = ctx->m9216_hw_context_generation;
+            ctx->q4_control_source_generations[1] = ctx->m9216_kernel_generation;
+            ctx->q4_control_source_generations[2] = ctx->m9216_instruction_bo_generation;
+            ctx->q4_control_source_generations[3] = ctx->m9216_shared_q4_bo_generation;
+            ctx->q4_control_source_generations[4] = ctx->m9216_q8_bo_generation;
+            ctx->q4_control_source_generations[5] = ctx->m9216_output_bo_generation;
+            ctx->q4_control_source_generations[6] = 0;
+            ctx->q4_control_source_objects[0] = ctx->q4_m9216_hw_context.get();
+            ctx->q4_control_source_objects[1] = ctx->q4_m9216_kernel.get();
+            ctx->q4_control_source_objects[2] = ctx->q4_m9216_bo_instr.get();
+            ctx->q4_control_source_objects[3] = ctx->q4_m9216_bo_q4.get();
+            ctx->q4_control_source_objects[4] = ctx->q4_m9216_bo_q8.get();
+            ctx->q4_control_source_objects[5] = ctx->q4_m9216_bo_out.get();
+            ctx->q4_control_source_objects[6] = nullptr;
+            std::memcpy(ctx->q4_control_source_instruction_sha256, instruction_sha, sizeof(instruction_sha));
+            ctx->q4_control_source_xclbin_identity = ctx->q4_m9216_xclbin.get();
+            ctx->q4_control_snapshot_valid = true;
+            std::fprintf(stderr, "XDNA_Q4_CONTROL_CAPTURE backend_instance_id=%llu ordinal=7 node=ffn_gate-3 bytes=%zu offset=0 sha256=%s q8_sha256=%s instruction_sha256=%s xclbin_identity=%p kernel=%p hw_context=%p instruction_bo=%p shared_q4_bo=%p q8_bo=%p output_bo=%p hw_context_gen=%llu kernel_gen=%llu instruction_bo_gen=%llu shared_q4_bo_gen=%llu q8_bo_gen=%llu output_bo_gen=%llu persistent_q4_bo_gen=0 correlation_id=%llu xrt_seq=%llu capture_success=1\n",
                 static_cast<unsigned long long>(ctx->backend_instance_id), q4_transport_bytes,
-                ctx->a7f_q4_control_snapshot_sha256, q8_sha, instruction_sha,
-                static_cast<const void *>(ctx->a7f_q4_source_xclbin_identity),
+                ctx->q4_control_snapshot_sha256, q8_sha, instruction_sha,
+                static_cast<const void *>(ctx->q4_control_source_xclbin_identity),
                 static_cast<void *>(ctx->q4_m9216_kernel.get()), static_cast<void *>(ctx->q4_m9216_hw_context.get()),
                 static_cast<void *>(ctx->q4_m9216_bo_instr.get()), static_cast<void *>(ctx->q4_m9216_bo_q4.get()),
                 static_cast<void *>(ctx->q4_m9216_bo_q8.get()), static_cast<void *>(ctx->q4_m9216_bo_out.get()),
@@ -4407,8 +4407,8 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
                 static_cast<unsigned long long>(submission_sequence_id), static_cast<unsigned long long>(trace_sequence_id));
             if (std::strcmp(q8_sha, "680d8fe1d964eea065bc4efd261feaa7798143fef06d2930f6f18ef19e473078") != 0 ||
                 std::strcmp(instruction_sha, "3e0afc787e75aa706198fdf40f0cc96e5a7f9ed1d900fcdb6dd42e3499bb68d3") != 0) {
-                std::fprintf(stderr, "A7F_ONLY_Q4_TRANSPORT_BYTES_CHANGED=NO reason=ordinal7_q8_or_instruction_mismatch\n");
-                std::fprintf(stderr, "A7F_Q4_CONTROL_ABORT reason=ordinal7_q8_or_instruction_mismatch\n");
+                std::fprintf(stderr, "XDNA_Q4_CONTROL_ONLY_TRANSPORT_BYTES_CHANGED=NO reason=ordinal7_q8_or_instruction_mismatch\n");
+                std::fprintf(stderr, "XDNA_Q4_CONTROL_ABORT reason=ordinal7_q8_or_instruction_mismatch\n");
                 return false;
             }
         }
@@ -4604,7 +4604,7 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560(
                 instructions,
                 instruction_bytes);
 
-            // LLAMA-XDNA-K2560-INTEGRATION-A1: mandatory host ordering rule.
+            // K=2560 integration: mandatory host ordering rule.
             ggml_backend_xdna_sync_host_written_bo(
                 *bo_instr,
                 "K=2560 per-row instruction BO (CACHEABLE)");
@@ -4665,7 +4665,7 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560(
             q4_transport.data(),
             q4_transport_row_bytes);
 
-        // LLAMA-XDNA-K2560-INTEGRATION-A1: mandatory host ordering rule - flush
+        // K=2560 integration: mandatory host ordering rule - flush
         // every host-written HOST_ONLY BO before the launch. The output BO is never
         // written by the host on this path (no prefill), so it needs no pre-launch
         // flush; it is only read back after run.wait().
@@ -4907,10 +4907,10 @@ ggml_backend_xdna_init_q4k_q8k_k2560_m9216(
             return false;
         }
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-        ctx->m9216_hw_context_generation = ggml_backend_xdna_a7c_new_resource_generation(ctx);
+        ctx->m9216_hw_context_generation = ggml_backend_xdna_new_resource_generation(ctx);
 #endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-        ctx->m9216_kernel_generation = ggml_backend_xdna_a7c_new_resource_generation(ctx);
+        ctx->m9216_kernel_generation = ggml_backend_xdna_new_resource_generation(ctx);
 #endif
 
         ctx->q4_m9216_available =
@@ -4960,7 +4960,7 @@ static ggml_backend_t ggml_backend_xdna_device_init(
     }
     std::lock_guard<std::mutex> device_state_lock(device_ctx->q4_shared->state_mutex);
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-    const bool a7h2_host_only =
+    const bool host_preflight_host_only =
         std::getenv("GGML_XDNA_DIAG_A7H2_HOST_PREFLIGHT_ONLY") != nullptr;
 #endif
 
@@ -4990,45 +4990,45 @@ static ggml_backend_t ggml_backend_xdna_device_init(
             &requested_profile,
             &xclbin_path)) {
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-        if (a7h2_host_only) {
-            ggml_backend_xdna_a7h2_log_host_only_stop(false, "backend_params_parse_failed");
+        if (host_preflight_host_only) {
+            ggml_backend_xdna_log_host_only_stop(false, "backend_params_parse_failed");
         }
 #endif
         return nullptr;
     }
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-    bool a7f_preflight_passed = false;
-    const char * a7h1_failure_reason = nullptr;
-    const char * a7f_control = std::getenv("GGML_XDNA_DIAG_Q4_ORD7_AT_ORD8");
-    const bool a7f_requested = a7f_control != nullptr && std::strcmp(a7f_control, "1") == 0;
-    if (a7f_requested || a7h2_host_only) {
-        if (a7h2_host_only) {
+    bool profile_preflight_passed = false;
+    const char * profile_failure_reason = nullptr;
+    const char * q4_control = std::getenv("GGML_XDNA_DIAG_Q4_ORD7_AT_ORD8");
+    const bool q4_control_requested = q4_control != nullptr && std::strcmp(q4_control, "1") == 0;
+    if (q4_control_requested || host_preflight_host_only) {
+        if (host_preflight_host_only) {
             try {
-                a7f_preflight_passed = ggml_backend_xdna_a7h1_profile_preflight(
-                    resolved_params, requested_profile, xclbin_path, a7h2_host_only, &a7h1_failure_reason);
+                profile_preflight_passed = ggml_backend_xdna_profile_preflight(
+                    resolved_params, requested_profile, xclbin_path, host_preflight_host_only, &profile_failure_reason);
             } catch (const std::exception &) {
-                ggml_backend_xdna_a7h2_log_host_only_stop(false, "a7h1_preflight_exception");
+                ggml_backend_xdna_log_host_only_stop(false, "profile_preflight_exception");
                 return nullptr;
             } catch (...) {
-                ggml_backend_xdna_a7h2_log_host_only_stop(false, "a7h1_preflight_unknown_exception");
+                ggml_backend_xdna_log_host_only_stop(false, "profile_preflight_unknown_exception");
                 return nullptr;
             }
         } else {
-            a7f_preflight_passed = ggml_backend_xdna_a7h1_profile_preflight(
-                resolved_params, requested_profile, xclbin_path, a7h2_host_only, &a7h1_failure_reason);
+            profile_preflight_passed = ggml_backend_xdna_profile_preflight(
+                resolved_params, requested_profile, xclbin_path, host_preflight_host_only, &profile_failure_reason);
         }
-        if (a7h2_host_only) {
-            ggml_backend_xdna_a7h2_log_host_only_stop(
-                a7f_preflight_passed, a7h1_failure_reason);
+        if (host_preflight_host_only) {
+            ggml_backend_xdna_log_host_only_stop(
+                profile_preflight_passed, profile_failure_reason);
             return nullptr;
         }
-        if (!a7f_preflight_passed) return nullptr;
+        if (!profile_preflight_passed) return nullptr;
     }
 #endif
 
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
     if (!ggml_backend_xdna_diagnostic_capture_validate_profile(requested_profile)) {
-        std::fprintf(stderr, "ggml_xdna: BR1 capture requires the q4k_q8k_k2560 profile; backend init rejected\n");
+        std::fprintf(stderr, "ggml_xdna: XDNA capture requires the q4k_q8k_k2560 profile; backend init rejected\n");
         return nullptr;
     }
 #endif
@@ -5057,10 +5057,10 @@ static ggml_backend_t ggml_backend_xdna_device_init(
     backend_ctx->kernel_profile = requested_profile;
 
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-    if (a7f_preflight_passed) {
+    if (profile_preflight_passed) {
         // Keep the preflighted control armed so later gate removal fails closed.
-        backend_ctx->a7f_q4_control_gate_checked = true;
-        backend_ctx->a7f_q4_control_enabled = true;
+        backend_ctx->q4_control_gate_checked = true;
+        backend_ctx->q4_control_enabled = true;
     }
 #endif
     if (requested_profile !=
@@ -5075,7 +5075,7 @@ static ggml_backend_t ggml_backend_xdna_device_init(
                 : xclbin_path;
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
         if (!ggml_backend_xdna_diagnostic_capture_initialize(backend_ctx)) {
-            std::fprintf(stderr, "ggml_xdna: invalid or non-fresh BR1 capture directory/metadata\n");
+            std::fprintf(stderr, "ggml_xdna: invalid or non-fresh XDNA capture directory/metadata\n");
             delete backend_ctx;
             return nullptr;
         }
@@ -5150,7 +5150,7 @@ static ggml_backend_t ggml_backend_xdna_device_init(
     }
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
     if (std::getenv("GGML_XDNA_INSTANCE_TRACE") != nullptr) {
-        std::fprintf(stderr, "BJ1 RESOURCES backend_id=%llu primary_xclbin=%p primary_hw=%p primary_kernel=%p M1024_hw=%p M1024_kernel=%p M4096_hw=%p M4096_kernel=%p M8192_hw=%p M8192_kernel=%p M9216_hw=%p M9216_kernel=%p\n", static_cast<unsigned long long>(backend_ctx->backend_instance_id), static_cast<void *>(backend_ctx->xclbin.get()), static_cast<void *>(backend_ctx->hw_context.get()), static_cast<void *>(backend_ctx->kernel.get()), static_cast<void *>(backend_ctx->q4_m1024.hw_context.get()), static_cast<void *>(backend_ctx->q4_m1024.kernel.get()), static_cast<void *>(backend_ctx->q4_m4096.hw_context.get()), static_cast<void *>(backend_ctx->q4_m4096.kernel.get()), static_cast<void *>(backend_ctx->q4_m8192.hw_context.get()), static_cast<void *>(backend_ctx->q4_m8192.kernel.get()), static_cast<void *>(backend_ctx->q4_m9216_hw_context.get()), static_cast<void *>(backend_ctx->q4_m9216_kernel.get()));
+        std::fprintf(stderr, "XDNA_BACKEND_INSTANCE RESOURCES backend_id=%llu primary_xclbin=%p primary_hw=%p primary_kernel=%p M1024_hw=%p M1024_kernel=%p M4096_hw=%p M4096_kernel=%p M8192_hw=%p M8192_kernel=%p M9216_hw=%p M9216_kernel=%p\n", static_cast<unsigned long long>(backend_ctx->backend_instance_id), static_cast<void *>(backend_ctx->xclbin.get()), static_cast<void *>(backend_ctx->hw_context.get()), static_cast<void *>(backend_ctx->kernel.get()), static_cast<void *>(backend_ctx->q4_m1024.hw_context.get()), static_cast<void *>(backend_ctx->q4_m1024.kernel.get()), static_cast<void *>(backend_ctx->q4_m4096.hw_context.get()), static_cast<void *>(backend_ctx->q4_m4096.kernel.get()), static_cast<void *>(backend_ctx->q4_m8192.hw_context.get()), static_cast<void *>(backend_ctx->q4_m8192.kernel.get()), static_cast<void *>(backend_ctx->q4_m9216_hw_context.get()), static_cast<void *>(backend_ctx->q4_m9216_kernel.get()));
     }
 #endif
     if (device_ctx->active_backend_count == 0) {
@@ -5163,7 +5163,7 @@ static ggml_backend_t ggml_backend_xdna_device_init(
 
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
     if (std::getenv("GGML_XDNA_INSTANCE_TRACE") != nullptr) {
-        std::fprintf(stderr, "BJ1 INIT backend_id=%llu backend_ptr=%p device_ctx=%p xrt_device=%p active_backend_count=%zu profile=%s\n", static_cast<unsigned long long>(backend_ctx->backend_instance_id), static_cast<void *>(backend_ctx), static_cast<void *>(device_ctx), static_cast<void *>(device_ctx->xrt_device.get()), device_ctx->active_backend_count, ggml_backend_xdna_kernel_profile_name(requested_profile));
+        std::fprintf(stderr, "XDNA_BACKEND_INSTANCE INIT backend_id=%llu backend_ptr=%p device_ctx=%p xrt_device=%p active_backend_count=%zu profile=%s\n", static_cast<unsigned long long>(backend_ctx->backend_instance_id), static_cast<void *>(backend_ctx), static_cast<void *>(device_ctx), static_cast<void *>(device_ctx->xrt_device.get()), device_ctx->active_backend_count, ggml_backend_xdna_kernel_profile_name(requested_profile));
     }
 #endif
     std::fprintf(
@@ -5337,7 +5337,7 @@ static bool ggml_backend_xdna_device_supports_op(
         }
 
         case ggml_backend_xdna_kernel_profile::q4k_q8k_w2in_256:
-            // Dedicated W2IN block profile (LLAMA-XDNA-W2IN-PROFILE-A1).
+            // Dedicated W2IN block profile (W2IN block profile).
             // The proven block ABI (q8 292 B + compact 32 B -> 32 x i32) has no
             // scheduler-advertised GEMM geometry; it is driven exclusively by
             // the explicit block probe on this profile, so the scheduler must
@@ -5422,7 +5422,7 @@ static size_t ggml_backend_xdna_reg_get_device_count(ggml_backend_reg_t reg) {
     if (ctx->stop_after_xrt_module_preflight) return 0;
 #endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-    if (ctx->a7g3_identity_gate_failed) return 0;
+    if (ctx->identity_gate_failed) return 0;
 #endif
     return 1;
 }
@@ -5443,13 +5443,13 @@ static void * ggml_backend_xdna_reg_get_proc_address(
     (void) reg;
 
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-    const char * a7f_q4_value = std::getenv("GGML_XDNA_DIAG_Q4_ORD7_AT_ORD8");
-    if (a7f_q4_value != nullptr && std::strcmp(a7f_q4_value, "1") == 0) {
+    const char * q4_control_value = std::getenv("GGML_XDNA_DIAG_Q4_ORD7_AT_ORD8");
+    if (q4_control_value != nullptr && std::strcmp(q4_control_value, "1") == 0) {
         if (reg == nullptr || reg->context == nullptr) return nullptr;
         const auto * device = static_cast<ggml_backend_device *>(reg->context);
         const auto * ctx = device == nullptr ? nullptr :
             static_cast<ggml_backend_xdna_context *>(device->context);
-        if (ctx == nullptr || ctx->a7g3_identity_gate_failed) return nullptr;
+        if (ctx == nullptr || ctx->identity_gate_failed) return nullptr;
     }
 #endif
     if (name != nullptr &&

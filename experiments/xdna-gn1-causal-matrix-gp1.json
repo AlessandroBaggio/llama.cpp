@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "status": "HOST_PLAN_ONLY_NO_EXECUTOR",
+  "stop_policy": "STOP_XDNA1_DECODE_ACCELERATION",
+  "gn1_capture_dir_from_repo_root": "../../experiments/xdna-causal-prefix-capture-gn1-20260929-115413/capture",
+  "fixed_target": { "node": "ffn_gate-4", "m": 9216, "k": 2560 },
+  "prefix_mode": { "source": "GN1 captures 1-12 exactly", "m4096_count": 4, "m9216_count": 8, "exclude_target_capture": 13 },
+  "clean_mode": { "prefix_capture_ids": [] },
+  "pair_a": {
+    "capture_id": 2,
+    "source_node": "ffn_gate-0",
+    "q4_native_sha256": "d62a31e6088cf0b771fb44021a6a9853d439de24edfa2c914d6bf196794f2ea9",
+    "q8_sha256": "53a0683b3fa07d13305fbf844ea839d7a3e771c414632b74d16efff286e70660"
+  },
+  "pair_b": {
+    "capture_id": 13,
+    "source_node": "ffn_gate-4",
+    "q4_native_sha256": "b442633de4f499245e18224bc8da7da5defddd81974cf58ca4a2c8693f5f003a",
+    "q8_sha256": "02876a59bd6251377c7d76806fd690b42aa0a579cf43e37399bcad3d0957332e"
+  },
+  "xclbin": {
+    "path_from_root": "experiments/xdna-q4k-persistent-multichunk-ap1/ap1_128.xclbin",
+    "sha256": "b8d5bc1f77c7325696ee3c7c0496323b5e523fd296475560eb21c0884aea2d83"
+  },
+  "instructions": {
+    "4096": { "path_from_root": "experiments/xdna-q4k-runtime-m-sweep-aq1/aq1_m4096.insts.bin", "sha256": "0309cdff9e81f4ceb77933e291379da731be817a4033e7a60ba8322d594ed904" },
+    "9216": { "path_from_root": "experiments/xdna-q4k-runtime-m-sweep-aq1/aq1_m9216.insts.bin", "sha256": "3e0afc787e75aa706198fdf40f0cc96e5a7f9ed1d900fcdb6dd42e3499bb68d3" }
+  },
+  "per_cell_fresh_process_required": true,
+  "same_artifact_settings_and_factory_required": true,
+  "global_runtime_or_device_reset_claimed": false,
+  "output_reference_bytes_captured": false,
+  "execution_authorized": false,
+  "separate_cell_authorization_required": true
+}

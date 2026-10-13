@@ -55,7 +55,7 @@ assert not valid_contract(acquire=ACQUIRE.replace("resources->registered_uuid !=
 PRIMARY_INIT = body(
     SOURCE,
     "static bool ggml_backend_xdna_init_kernel(",
-    "// LLAMA-XDNA-NPU1-INTEGRATION-A1 - controlled single-block W2IN invocation.",
+    "// NPU1 integration - controlled single-block W2IN invocation.",
 )
 assert "ctx, \"PRIMARY\"" in PRIMARY_INIT and "ctx->kernel, resolved_kernel_name))" in PRIMARY_INIT
 assert "state.xclbin, state.hw_context, state.kernel, resolved_kernel_name" in SHAPE_INIT

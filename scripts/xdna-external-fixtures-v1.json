@@ -1,0 +1,463 @@
+{
+  "schema": "XDNA_EXTERNAL_DIAGNOSTIC_FIXTURES_V1",
+  "schema_version": 1,
+  "note": "Metadata only. Fixture payloads and pinned legacy artifacts are deliberately external and are not copied or versioned.",
+  "fixtures": [
+    {
+      "id": "BR1_CF1_20260924_115708_53d167aa",
+      "format": "CF1 capture directory: manifest.jsonl, run_metadata.json, and binary submission artifacts",
+      "input_argument": "--br1-capture-dir",
+      "size_bytes": 153440737,
+      "files": [
+        {
+          "path": "000001_z-0_M4096_instr.bin",
+          "size_bytes": 84148,
+          "sha256": "0309cdff9e81f4ceb77933e291379da731be817a4033e7a60ba8322d594ed904"
+        },
+        {
+          "path": "000001_z-0_M4096_out.bin",
+          "size_bytes": 16384,
+          "sha256": "87d70ce453bae75d29f1c15932d067fae7b40a7fb4d3e5d69cc970f7051d719f"
+        },
+        {
+          "path": "000001_z-0_M4096_q4.bin",
+          "size_bytes": 6225920,
+          "sha256": "d7104362b1bdb4e8094a3fbb72642901730422d3d9ab1a4ae16ed6eb5732f70d"
+        },
+        {
+          "path": "000001_z-0_M4096_q8.bin",
+          "size_bytes": 2920,
+          "sha256": "abd34dd26146f99052112a5781a7dc77de25c1db38e5bc76f160dfd9c6beec4d"
+        },
+        {
+          "path": "000002_ffn_gate-0_M9216_instr.bin",
+          "size_bytes": 189108,
+          "sha256": "3e0afc787e75aa706198fdf40f0cc96e5a7f9ed1d900fcdb6dd42e3499bb68d3"
+        },
+        {
+          "path": "000002_ffn_gate-0_M9216_out.bin",
+          "size_bytes": 36864,
+          "sha256": "e5628bb172e7dcfafd5aea8be751bebac7bca2290d97212e48cee23124b08fdb"
+        },
+        {
+          "path": "000002_ffn_gate-0_M9216_q4.bin",
+          "size_bytes": 14008320,
+          "sha256": "924a59c68a19140981f7bc3efef719f519ad2744540421839007f1dd03fe97df"
+        },
+        {
+          "path": "000002_ffn_gate-0_M9216_q8.bin",
+          "size_bytes": 2920,
+          "sha256": "53a0683b3fa07d13305fbf844ea839d7a3e771c414632b74d16efff286e70660"
+        },
+        {
+          "path": "000003_ffn_up-0_M9216_instr.bin",
+          "size_bytes": 189108,
+          "sha256": "3e0afc787e75aa706198fdf40f0cc96e5a7f9ed1d900fcdb6dd42e3499bb68d3"
+        },
+        {
+          "path": "000003_ffn_up-0_M9216_out.bin",
+          "size_bytes": 36864,
+          "sha256": "43eee09b11808f20e8edc381a1c9984ee19721194d1362c32e323cd46a5da0f1"
+        },
+        {
+          "path": "000003_ffn_up-0_M9216_q4.bin",
+          "size_bytes": 14008320,
+          "sha256": "081d5c31e2738fe9af803036f5cd49d8859622aca697241062897cccc224d629"
+        },
+        {
+          "path": "000003_ffn_up-0_M9216_q8.bin",
+          "size_bytes": 2920,
+          "sha256": "53a0683b3fa07d13305fbf844ea839d7a3e771c414632b74d16efff286e70660"
+        },
+        {
+          "path": "000004_z-1_M4096_instr.bin",
+          "size_bytes": 84148,
+          "sha256": "0309cdff9e81f4ceb77933e291379da731be817a4033e7a60ba8322d594ed904"
+        },
+        {
+          "path": "000004_z-1_M4096_out.bin",
+          "size_bytes": 16384,
+          "sha256": "38d6ec8fe1fb710597c141d8e662473a34b4191abc597f7050385c3fa1fed8c4"
+        },
+        {
+          "path": "000004_z-1_M4096_q4.bin",
+          "size_bytes": 6225920,
+          "sha256": "ad5aa1ee24c2749bed7fe8604f4f07b23c7f9a36979903eac3e567d92ab4ca3a"
+        },
+        {
+          "path": "000004_z-1_M4096_q8.bin",
+          "size_bytes": 2920,
+          "sha256": "34830a7a86f57ef58fc5454a76d25ace9c525b1f8bfcb4931583d9c80a1cc0a9"
+        },
+        {
+          "path": "000005_ffn_gate-1_M9216_instr.bin",
+          "size_bytes": 189108,
+          "sha256": "3e0afc787e75aa706198fdf40f0cc96e5a7f9ed1d900fcdb6dd42e3499bb68d3"
+        },
+        {
+          "path": "000005_ffn_gate-1_M9216_out.bin",
+          "size_bytes": 36864,
+          "sha256": "953c3821b69c999c1bdfbe217496bcddf2cde32760ce1873faf14fdd9f9093ac"
+        },
+        {
+          "path": "000005_ffn_gate-1_M9216_q4.bin",
+          "size_bytes": 14008320,
+          "sha256": "88797dfe5cd15c8cbc8b1a18f5dbe50eddf791cdad2cb4069e7d16fa0d91f1ef"
+        },
+        {
+          "path": "000005_ffn_gate-1_M9216_q8.bin",
+          "size_bytes": 2920,
+          "sha256": "30641a8585a18cd77b5c00a7c591055b6156035ec777ec0b2e7ce6648589ccbc"
+        },
+        {
+          "path": "000006_ffn_up-1_M9216_instr.bin",
+          "size_bytes": 189108,
+          "sha256": "3e0afc787e75aa706198fdf40f0cc96e5a7f9ed1d900fcdb6dd42e3499bb68d3"
+        },
+        {
+          "path": "000006_ffn_up-1_M9216_out.bin",
+          "size_bytes": 36864,
+          "sha256": "b366e3d3d0da16f466c66c055487d3849949e305db3b86201821eb4cb63ee9c4"
+        },
+        {
+          "path": "000006_ffn_up-1_M9216_q4.bin",
+          "size_bytes": 14008320,
+          "sha256": "1341b2565679360b678ee0c68fa5fc157a907110a40f5ffbad97e89dc7bc60b9"
+        },
+        {
+          "path": "000006_ffn_up-1_M9216_q8.bin",
+          "size_bytes": 2920,
+          "sha256": "30641a8585a18cd77b5c00a7c591055b6156035ec777ec0b2e7ce6648589ccbc"
+        },
+        {
+          "path": "000007_z-2_M4096_instr.bin",
+          "size_bytes": 84148,
+          "sha256": "0309cdff9e81f4ceb77933e291379da731be817a4033e7a60ba8322d594ed904"
+        },
+        {
+          "path": "000007_z-2_M4096_out.bin",
+          "size_bytes": 16384,
+          "sha256": "6da6b7d7ebf672bc203bb00620882d159cc00371900b84ae4f730aef9cb79c66"
+        },
+        {
+          "path": "000007_z-2_M4096_q4.bin",
+          "size_bytes": 6225920,
+          "sha256": "66b717d460b71858de0f190e2cc90a8a97377f142d243fbda53546ee30fc5e03"
+        },
+        {
+          "path": "000007_z-2_M4096_q8.bin",
+          "size_bytes": 2920,
+          "sha256": "4a993d15e65e127d63b7b4816fccbb290f257eb7ce8204596b6413e3ce50106a"
+        },
+        {
+          "path": "000008_ffn_gate-2_M9216_instr.bin",
+          "size_bytes": 189108,
+          "sha256": "3e0afc787e75aa706198fdf40f0cc96e5a7f9ed1d900fcdb6dd42e3499bb68d3"
+        },
+        {
+          "path": "000008_ffn_gate-2_M9216_out.bin",
+          "size_bytes": 36864,
+          "sha256": "06d846b2de3bc807d41adb6e85565e8f6703acd3bb0f2ab97c0c9213cba892a3"
+        },
+        {
+          "path": "000008_ffn_gate-2_M9216_q4.bin",
+          "size_bytes": 14008320,
+          "sha256": "748472f6c07290ac4ffcd6ed3250a13166c8f3f284e17c5edaa4b7e6a3343c1c"
+        },
+        {
+          "path": "000008_ffn_gate-2_M9216_q8.bin",
+          "size_bytes": 2920,
+          "sha256": "150f43cd0191b83eab9031fa095d3cc65053f9789a831879769bc7af04ea1e9e"
+        },
+        {
+          "path": "000009_ffn_up-2_M9216_instr.bin",
+          "size_bytes": 189108,
+          "sha256": "3e0afc787e75aa706198fdf40f0cc96e5a7f9ed1d900fcdb6dd42e3499bb68d3"
+        },
+        {
+          "path": "000009_ffn_up-2_M9216_out.bin",
+          "size_bytes": 36864,
+          "sha256": "49e1d8bf54f0e7edb4963d46992b29d34623540567700508c2e1a9601f2ed8f9"
+        },
+        {
+          "path": "000009_ffn_up-2_M9216_q4.bin",
+          "size_bytes": 14008320,
+          "sha256": "9a8c70b32f34a4580f64e043529b4524e0d661ced2b732b80126b731ea02b509"
+        },
+        {
+          "path": "000009_ffn_up-2_M9216_q8.bin",
+          "size_bytes": 2920,
+          "sha256": "150f43cd0191b83eab9031fa095d3cc65053f9789a831879769bc7af04ea1e9e"
+        },
+        {
+          "path": "000010_ffn_gate-3_M9216_instr.bin",
+          "size_bytes": 189108,
+          "sha256": "3e0afc787e75aa706198fdf40f0cc96e5a7f9ed1d900fcdb6dd42e3499bb68d3"
+        },
+        {
+          "path": "000010_ffn_gate-3_M9216_out.bin",
+          "size_bytes": 36864,
+          "sha256": "71267d101ee64594ea4f0202e357820ab1cfc991d0c5f01cbea06257c6befa14"
+        },
+        {
+          "path": "000010_ffn_gate-3_M9216_q4.bin",
+          "size_bytes": 14008320,
+          "sha256": "c6c5610af0fea6d909a0412a2e97ff93fc130e29a3aa1c46bf0ebf55f73951a4"
+        },
+        {
+          "path": "000010_ffn_gate-3_M9216_q8.bin",
+          "size_bytes": 2920,
+          "sha256": "680d8fe1d964eea065bc4efd261feaa7798143fef06d2930f6f18ef19e473078"
+        },
+        {
+          "path": "000011_ffn_up-3_M9216_instr.bin",
+          "size_bytes": 189108,
+          "sha256": "3e0afc787e75aa706198fdf40f0cc96e5a7f9ed1d900fcdb6dd42e3499bb68d3"
+        },
+        {
+          "path": "000011_ffn_up-3_M9216_out.bin",
+          "size_bytes": 36864,
+          "sha256": "8eb6dfd2a2e623cacfd16c8c6663035c2c46199d7ef77d8918746ef10bc9da48"
+        },
+        {
+          "path": "000011_ffn_up-3_M9216_q4.bin",
+          "size_bytes": 14008320,
+          "sha256": "2c0e3b517d76ad7619fadf6d345f9e04be0dec1356e9216fa922f237c6ef86f5"
+        },
+        {
+          "path": "000011_ffn_up-3_M9216_q8.bin",
+          "size_bytes": 2920,
+          "sha256": "680d8fe1d964eea065bc4efd261feaa7798143fef06d2930f6f18ef19e473078"
+        },
+        {
+          "path": "000012_z-4_M4096_instr.bin",
+          "size_bytes": 84148,
+          "sha256": "0309cdff9e81f4ceb77933e291379da731be817a4033e7a60ba8322d594ed904"
+        },
+        {
+          "path": "000012_z-4_M4096_out.bin",
+          "size_bytes": 16384,
+          "sha256": "7975c37bdd87599ea5548fa6533384429767110d116919cd81f5c0aa8f8f24de"
+        },
+        {
+          "path": "000012_z-4_M4096_q4.bin",
+          "size_bytes": 6225920,
+          "sha256": "b61ce27dabe78f4bac2babd2828584fbf1b27502e488eec802d7356d4caeea83"
+        },
+        {
+          "path": "000012_z-4_M4096_q8.bin",
+          "size_bytes": 2920,
+          "sha256": "e512ade217b8a0896d0bb5d12ca106efb1fc98042dfeabfd5e2f86dfbd82eb29"
+        },
+        {
+          "path": "000013_ffn_gate-4_M9216_instr.bin",
+          "size_bytes": 189108,
+          "sha256": "3e0afc787e75aa706198fdf40f0cc96e5a7f9ed1d900fcdb6dd42e3499bb68d3"
+        },
+        {
+          "path": "000013_ffn_gate-4_M9216_q4.bin",
+          "size_bytes": 14008320,
+          "sha256": "e14c335fc3ddddd4242132f665db88d1d9442185856f95ed4e8b7a4adaa65cfd"
+        },
+        {
+          "path": "000013_ffn_gate-4_M9216_q8.bin",
+          "size_bytes": 2920,
+          "sha256": "02876a59bd6251377c7d76806fd690b42aa0a579cf43e37399bcad3d0957332e"
+        },
+        {
+          "path": "manifest.jsonl",
+          "size_bytes": 24833,
+          "sha256": "d80e1c69ab629b566536c90d07689579d3460e135da9ab2dee267a93aedea4af"
+        },
+        {
+          "path": "run_metadata.json",
+          "size_bytes": 372,
+          "sha256": "e0288c061b962ba9ef1f360e6f800a147a3729a40bc7984c3857964d4815a542"
+        }
+      ],
+      "required_by": [
+        "scripts/test-xdna-capture-replay-prefix-probe.py",
+        "scripts/test-xdna-capture-replay-dry-run.py --br1-capture-dir"
+      ]
+    },
+    {
+      "id": "GN1_PREFIX_20260929_115413",
+      "format": "GN1 capture directory: manifest.jsonl and payloads/*.bin",
+      "input_argument": "--gn1-capture-dir",
+      "size_bytes": 143089706,
+      "files": [
+        {
+          "path": "manifest.jsonl",
+          "size_bytes": 19426,
+          "sha256": "9f4dc51960c6200c9a82e8b3902a5fa540dd5fc9e9a7ffdcfcc8201f67706c78"
+        },
+        {
+          "path": "payloads/000001.q4-native.bin",
+          "size_bytes": 5898240,
+          "sha256": "565a122457cffeb15480126abd08e9e2b5ddd225e93afa7394432635f8507573"
+        },
+        {
+          "path": "payloads/000001.q8.bin",
+          "size_bytes": 2920,
+          "sha256": "abd34dd26146f99052112a5781a7dc77de25c1db38e5bc76f160dfd9c6beec4d"
+        },
+        {
+          "path": "payloads/000002.q4-native.bin",
+          "size_bytes": 13271040,
+          "sha256": "d62a31e6088cf0b771fb44021a6a9853d439de24edfa2c914d6bf196794f2ea9"
+        },
+        {
+          "path": "payloads/000002.q8.bin",
+          "size_bytes": 2920,
+          "sha256": "53a0683b3fa07d13305fbf844ea839d7a3e771c414632b74d16efff286e70660"
+        },
+        {
+          "path": "payloads/000003.q4-native.bin",
+          "size_bytes": 13271040,
+          "sha256": "c741e45bd333ab4bb77803d8883c54fc54381ecbfbeaa239b7a2661bb7a84954"
+        },
+        {
+          "path": "payloads/000003.q8.bin",
+          "size_bytes": 2920,
+          "sha256": "53a0683b3fa07d13305fbf844ea839d7a3e771c414632b74d16efff286e70660"
+        },
+        {
+          "path": "payloads/000004.q4-native.bin",
+          "size_bytes": 5898240,
+          "sha256": "2e5c231deec6a6a987d8341397c042521fb6cad0f8e0479fe7ed131012413afc"
+        },
+        {
+          "path": "payloads/000004.q8.bin",
+          "size_bytes": 2920,
+          "sha256": "34830a7a86f57ef58fc5454a76d25ace9c525b1f8bfcb4931583d9c80a1cc0a9"
+        },
+        {
+          "path": "payloads/000005.q4-native.bin",
+          "size_bytes": 13271040,
+          "sha256": "b06ae73e8852f42bedd15c177189b123fff523915b2ec9732a0c0dca8cd27a6e"
+        },
+        {
+          "path": "payloads/000005.q8.bin",
+          "size_bytes": 2920,
+          "sha256": "30641a8585a18cd77b5c00a7c591055b6156035ec777ec0b2e7ce6648589ccbc"
+        },
+        {
+          "path": "payloads/000006.q4-native.bin",
+          "size_bytes": 13271040,
+          "sha256": "19913cdf1a36258823be306d803433c12902830841dce648c5666504073ab2f8"
+        },
+        {
+          "path": "payloads/000006.q8.bin",
+          "size_bytes": 2920,
+          "sha256": "30641a8585a18cd77b5c00a7c591055b6156035ec777ec0b2e7ce6648589ccbc"
+        },
+        {
+          "path": "payloads/000007.q4-native.bin",
+          "size_bytes": 5898240,
+          "sha256": "e772c5f8efd6f677ccd29cef9a43f2495202382db5f2e110f6fcd06b0e44f986"
+        },
+        {
+          "path": "payloads/000007.q8.bin",
+          "size_bytes": 2920,
+          "sha256": "4a993d15e65e127d63b7b4816fccbb290f257eb7ce8204596b6413e3ce50106a"
+        },
+        {
+          "path": "payloads/000008.q4-native.bin",
+          "size_bytes": 13271040,
+          "sha256": "9f717e4c750472587959ef04d03f54c0282f92b6cfdebadfd00efe44124025ca"
+        },
+        {
+          "path": "payloads/000008.q8.bin",
+          "size_bytes": 2920,
+          "sha256": "150f43cd0191b83eab9031fa095d3cc65053f9789a831879769bc7af04ea1e9e"
+        },
+        {
+          "path": "payloads/000009.q4-native.bin",
+          "size_bytes": 13271040,
+          "sha256": "ebd763718ebe73ee8f347acc23891c31db5bfc8edcc8a5bc47023d27af52af78"
+        },
+        {
+          "path": "payloads/000009.q8.bin",
+          "size_bytes": 2920,
+          "sha256": "150f43cd0191b83eab9031fa095d3cc65053f9789a831879769bc7af04ea1e9e"
+        },
+        {
+          "path": "payloads/000010.q4-native.bin",
+          "size_bytes": 13271040,
+          "sha256": "bf08ca9b2aa352e72845e769fa1557666cd62e50fb835626a39d44e1b79f9385"
+        },
+        {
+          "path": "payloads/000010.q8.bin",
+          "size_bytes": 2920,
+          "sha256": "680d8fe1d964eea065bc4efd261feaa7798143fef06d2930f6f18ef19e473078"
+        },
+        {
+          "path": "payloads/000011.q4-native.bin",
+          "size_bytes": 13271040,
+          "sha256": "80e568b6e2d60f4c7c16ca23b470c225138093a3e27e5c89c5046106c6eab4fe"
+        },
+        {
+          "path": "payloads/000011.q8.bin",
+          "size_bytes": 2920,
+          "sha256": "680d8fe1d964eea065bc4efd261feaa7798143fef06d2930f6f18ef19e473078"
+        },
+        {
+          "path": "payloads/000012.q4-native.bin",
+          "size_bytes": 5898240,
+          "sha256": "13c25db6d401277d7770f9d0de607350f770075398d7c44e8376984595949712"
+        },
+        {
+          "path": "payloads/000012.q8.bin",
+          "size_bytes": 2920,
+          "sha256": "e512ade217b8a0896d0bb5d12ca106efb1fc98042dfeabfd5e2f86dfbd82eb29"
+        },
+        {
+          "path": "payloads/000013.q4-native.bin",
+          "size_bytes": 13271040,
+          "sha256": "b442633de4f499245e18224bc8da7da5defddd81974cf58ca4a2c8693f5f003a"
+        },
+        {
+          "path": "payloads/000013.q8.bin",
+          "size_bytes": 2920,
+          "sha256": "02876a59bd6251377c7d76806fd690b42aa0a579cf43e37399bcad3d0957332e"
+        }
+      ],
+      "required_by": [
+        "scripts/test-xdna-causal-matrix-plan.py"
+      ]
+    }
+  ],
+  "configuration": {
+    "path": "repos/llama.cpp/experiments/xdna-gn1-causal-matrix-gp1.json",
+    "size_bytes": 1805,
+    "sha256": "de4fe161a3e256bce55939e837f77b527ab347222285fc7fb23be582bd1623df",
+    "input_argument": "--config",
+    "source": "small declarative config intended to be versioned"
+  },
+  "artifact_root_argument": "--artifact-root",
+  "pinned_artifacts": [
+    {
+      "path": "experiments/xdna-q4k-persistent-multichunk-ap1/ap1_128.xclbin",
+      "size_bytes": 32744,
+      "sha256": "b8d5bc1f77c7325696ee3c7c0496323b5e523fd296475560eb21c0884aea2d83"
+    },
+    {
+      "path": "experiments/xdna-q4k-runtime-m-sweep-aq1/aq1_m4096.insts.bin",
+      "size_bytes": 84148,
+      "sha256": "0309cdff9e81f4ceb77933e291379da731be817a4033e7a60ba8322d594ed904"
+    },
+    {
+      "path": "experiments/xdna-q4k-runtime-m-sweep-aq1/aq1_m9216.insts.bin",
+      "size_bytes": 189108,
+      "sha256": "3e0afc787e75aa706198fdf40f0cc96e5a7f9ed1d900fcdb6dd42e3499bb68d3"
+    }
+  ],
+  "test_dependencies": {
+    "scripts/test-xdna-capture-replay-prefix-probe.py": "BR1_CF1_20260924_115708_53d167aa",
+    "scripts/test-xdna-capture-replay-dry-run.py --br1-capture-dir": "BR1_CF1_20260924_115708_53d167aa",
+    "scripts/test-xdna-capture-replay-dry-run.py --xclbin-path": "experiments/xdna-q4k-persistent-multichunk-ap1/ap1_128.xclbin",
+    "scripts/test-xdna-causal-matrix-plan.py": "GN1_PREFIX_20260929_115413 plus configuration and pinned artifacts",
+    "scripts/xdna-capture-replay-plan.py --xclbin-path": "experiments/xdna-q4k-persistent-multichunk-ap1/ap1_128.xclbin",
+    "scripts/validate-xdna-capture.py --xclbin-path": "experiments/xdna-q4k-persistent-multichunk-ap1/ap1_128.xclbin"
+  }
+}
