@@ -124,3 +124,11 @@ if(GGML_XDNA_BUILD_DIAGNOSTICS)
     target_include_directories(xdna-causal-execution-gate-selftest PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
+
+option(GGML_XDNA_RUNTIME_TRACE "Build opt-in production-linkable XDNA runtime tracing" OFF)
+if(GGML_XDNA_RUNTIME_TRACE)
+    if(GGML_XDNA_BUILD_DIAGNOSTICS)
+        message(FATAL_ERROR "GGML_XDNA_RUNTIME_TRACE is trace-only and requires GGML_XDNA_BUILD_DIAGNOSTICS=OFF")
+    endif()
+    target_compile_definitions(ggml-xdna PRIVATE GGML_XDNA_RUNTIME_TRACE)
+endif()

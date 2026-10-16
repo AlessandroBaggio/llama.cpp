@@ -70,6 +70,156 @@ static ert_cmd_state ggml_backend_xdna_wait_run(
 }
 
 
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+struct ggml_backend_xdna_runtime_trace_node {
+    uint64_t graph_id;
+    int node_index;
+    const char * node_name;
+    const char * ggml_op;
+    int64_t m;
+    int64_t k;
+    int64_t rhs;
+};
+
+static std::atomic<uint64_t> ggml_backend_xdna_runtime_trace_graph_id{1};
+static std::atomic<uint64_t> ggml_backend_xdna_runtime_trace_submission_id{1};
+static std::mutex ggml_backend_xdna_runtime_trace_mutex;
+
+static bool ggml_backend_xdna_runtime_trace_enabled() noexcept {
+    const char * value = std::getenv("GGML_XDNA_RUNTIME_TRACE");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
+static uint64_t ggml_backend_xdna_runtime_trace_next_graph_id() noexcept {
+    return ggml_backend_xdna_runtime_trace_graph_id.fetch_add(1, std::memory_order_relaxed);
+}
+
+static uint64_t ggml_backend_xdna_runtime_trace_next_submission_id() noexcept {
+    return ggml_backend_xdna_runtime_trace_submission_id.fetch_add(1, std::memory_order_relaxed);
+}
+
+static void ggml_backend_xdna_runtime_trace_json_string(std::string & out, const char * value) {
+    if (value == nullptr) {
+        out += "null";
+        return;
+    }
+    static constexpr char hex[] = "0123456789abcdef";
+    out.push_back('"');
+    for (const unsigned char * p = reinterpret_cast<const unsigned char *>(value); *p != 0; ++p) {
+        switch (*p) {
+            case '"':
+            case '\\':
+                out.push_back('\\');
+                out.push_back(static_cast<char>(*p));
+                break;
+            case '\b': out.push_back('\\'); out.push_back('b'); break;
+            case '\f': out.push_back('\\'); out.push_back('f'); break;
+            case '\n': out.push_back('\\'); out.push_back('n'); break;
+            case '\r': out.push_back('\\'); out.push_back('r'); break;
+            case '\t': out.push_back('\\'); out.push_back('t'); break;
+            default:
+                if (*p < 0x20) {
+                    out.push_back('\\'); out.push_back('u'); out.push_back('0'); out.push_back('0');
+                    out.push_back(hex[*p >> 4]); out.push_back(hex[*p & 0x0f]);
+                } else {
+                    out.push_back(static_cast<char>(*p));
+                }
+        }
+    }
+    out.push_back('"');
+}
+
+static void ggml_backend_xdna_runtime_trace_field(
+        std::string & out, const char * name, const char * value) {
+    ggml_backend_xdna_runtime_trace_json_string(out, name);
+    out.push_back(':');
+    ggml_backend_xdna_runtime_trace_json_string(out, value);
+}
+
+static void ggml_backend_xdna_runtime_trace_number(
+        std::string & out, const char * name, uint64_t value) {
+    ggml_backend_xdna_runtime_trace_json_string(out, name);
+    out.push_back(':');
+    out += std::to_string(value);
+}
+
+static void ggml_backend_xdna_runtime_trace_event(
+        const ggml_backend_xdna_runtime_trace_node & node, uint64_t submission_id,
+        const char * kernel_name, const char * path, int64_t row_index,
+        const char * event, const char * xrt_state = nullptr, const char * error = nullptr) noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(ggml_backend_xdna_runtime_trace_mutex);
+        const uint64_t timestamp = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+        std::string line;
+        line.reserve(640);
+        line.push_back('{');
+        ggml_backend_xdna_runtime_trace_field(line, "schema", "ggml-xdna-runtime-trace-v1"); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_number(line, "graph_id", node.graph_id); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_number(line, "node_index", static_cast<uint64_t>(node.node_index)); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_field(line, "node_name", node.node_name); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_field(line, "ggml_op", node.ggml_op); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_field(line, "backend", "XDNA"); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_number(line, "M", static_cast<uint64_t>(node.m)); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_number(line, "K", static_cast<uint64_t>(node.k)); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_number(line, "RHS", static_cast<uint64_t>(node.rhs)); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_number(line, "submission_id", submission_id); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_field(line, "kernel_name", kernel_name); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_field(line, "path", path); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_json_string(line, "row_index"); line.push_back(':');
+        line += row_index < 0 ? "null" : std::to_string(row_index); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_field(line, "event", event); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_field(line, "xrt_state", xrt_state); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_field(line, "error", error); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_number(line, "monotonic_timestamp_ns", timestamp);
+        line.push_back('}');
+        std::fprintf(stderr, "%s\n", line.c_str());
+        std::fflush(stderr);
+    } catch (...) {
+        // Trace allocation or I/O failure must not change XRT execution semantics.
+    }
+}
+
+static const char * ggml_backend_xdna_runtime_trace_state_name(ert_cmd_state state) noexcept {
+    switch (state) {
+        case ERT_CMD_STATE_NEW: return "ERT_CMD_STATE_NEW";
+        case ERT_CMD_STATE_QUEUED: return "ERT_CMD_STATE_QUEUED";
+        case ERT_CMD_STATE_RUNNING: return "ERT_CMD_STATE_RUNNING";
+        case ERT_CMD_STATE_COMPLETED: return "ERT_CMD_STATE_COMPLETED";
+        case ERT_CMD_STATE_ERROR: return "ERT_CMD_STATE_ERROR";
+        case ERT_CMD_STATE_ABORT: return "ERT_CMD_STATE_ABORT";
+        case ERT_CMD_STATE_SUBMITTED: return "ERT_CMD_STATE_SUBMITTED";
+        case ERT_CMD_STATE_TIMEOUT: return "ERT_CMD_STATE_TIMEOUT";
+        case ERT_CMD_STATE_NORESPONSE: return "ERT_CMD_STATE_NORESPONSE";
+        case ERT_CMD_STATE_SKERROR: return "ERT_CMD_STATE_SKERROR";
+        case ERT_CMD_STATE_SKCRASHED: return "ERT_CMD_STATE_SKCRASHED";
+        case ERT_CMD_STATE_MAX: return "ERT_CMD_STATE_MAX";
+        default: return "UNKNOWN";
+    }
+}
+
+static ert_cmd_state ggml_backend_xdna_runtime_trace_wait(
+        const ggml_backend_xdna_runtime_trace_node * node, uint64_t submission_id,
+        const char * kernel_name, const char * path, int64_t row_index,
+        xrt::run & run, const std::chrono::milliseconds & timeout) {
+    if (node != nullptr) ggml_backend_xdna_runtime_trace_event(*node, submission_id, kernel_name, path, row_index, "WAIT_BEGIN");
+    ert_cmd_state state;
+    try {
+        state = ggml_backend_xdna_wait_run(run, timeout);
+    } catch (const std::exception & e) {
+        if (node != nullptr) ggml_backend_xdna_runtime_trace_event(*node, submission_id, kernel_name, path, row_index, "WAIT_EXCEPTION", nullptr, e.what());
+        throw;
+    } catch (...) {
+        if (node != nullptr) ggml_backend_xdna_runtime_trace_event(*node, submission_id, kernel_name, path, row_index, "WAIT_EXCEPTION", nullptr, "unknown exception");
+        throw;
+    }
+    if (node != nullptr) ggml_backend_xdna_runtime_trace_event(*node, submission_id, kernel_name, path, row_index,
+        "WAIT_RETURN_STATE", ggml_backend_xdna_runtime_trace_state_name(state),
+        state == ERT_CMD_STATE_COMPLETED ? nullptr : "non_completed_xrt_state");
+    return state;
+}
+#endif
+
 
 
 const char * ggml_backend_xdna_kernel_profile_name(
@@ -1991,13 +2141,20 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560(
         const float * activations,
         size_t activation_elements,
         bool refresh_activation,
-        float * result);
+        float * result
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+        , const ggml_backend_xdna_runtime_trace_node * trace_node, int64_t row_index
+#endif
+        );
 
 static bool ggml_backend_xdna_run_batched_shape(
         ggml_backend_xdna_backend_context * ctx, ggml_backend_xdna_batched_state & state,
         const void * q4_rows, size_t q4_rows_bytes, const float * activations,
         size_t activation_elements, float * result, size_t result_bytes,
         const char * node_name, int64_t k, int64_t rhs
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+        , const ggml_backend_xdna_runtime_trace_node * trace_node
+#endif
  #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
         , const struct ggml_tensor * node, int graph_node_index, uint64_t causal_sequence_id, bool causal_selected
  #endif
@@ -2010,11 +2167,14 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
         const float * activations,
         size_t activation_elements,
         float * result,
-        size_t result_bytes,
+        size_t result_bytes
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-        const struct ggml_tensor * node, int graph_node_index, uint64_t causal_sequence_id, bool causal_selected,
+        , const struct ggml_tensor * node, int graph_node_index, uint64_t causal_sequence_id, bool causal_selected
 #endif
-        const char * node_name, int64_t k, int64_t rhs);
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+        , const ggml_backend_xdna_runtime_trace_node * trace_node
+#endif
+        , const char * node_name, int64_t k, int64_t rhs);
 void ggml_backend_xdna_format_sha256(const unsigned char digest[GGML_XDNA_SHA256_DIGEST_SIZE], char out[GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1]);
 
 
@@ -2390,8 +2550,11 @@ static void ggml_backend_xdna_m9216_correlation_prepared(
 static enum ggml_status ggml_backend_xdna_graph_compute_single_node(
         ggml_backend_t backend,
         struct ggml_tensor * node
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+        , const ggml_backend_xdna_runtime_trace_node * runtime_trace_node
+#endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-, int graph_node_index
+        , int graph_node_index
 #endif
 ) {
     if (backend == nullptr) {
@@ -2554,11 +2717,14 @@ static enum ggml_status ggml_backend_xdna_graph_compute_single_node(
                     activations,
                     static_cast<size_t>(k),
                     result,
-                    expected_dst_bytes,
+                    expected_dst_bytes
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-                    node, graph_node_index, causal_sequence_id, causal_selected,
+                    , node, graph_node_index, causal_sequence_id, causal_selected
 #endif
-                    ggml_get_name(node), k, src1->ne[1])) {
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+                    , runtime_trace_node
+#endif
+                    , ggml_get_name(node), k, src1->ne[1])) {
                 std::fprintf(stderr, "ggml_xdna: M=9216 multi-row Q4_K K=2560 execution failed\n");
                 return GGML_STATUS_FAILED;
             }
@@ -2580,6 +2746,9 @@ static enum ggml_status ggml_backend_xdna_graph_compute_single_node(
             if (m == 4096 && !ggml_backend_xdna_causal_capture_reserve(&causal_sequence_id, &causal_selected)) return GGML_STATUS_FAILED;
 #endif
             if (!ggml_backend_xdna_run_batched_shape(ctx, state, q4_rows, expected_q4_bytes, activations, static_cast<size_t>(k), result, expected_dst_bytes, ggml_get_name(node), k, src1->ne[1]
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+                    , runtime_trace_node
+#endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
                     , node, graph_node_index, causal_sequence_id, causal_selected
 #endif
@@ -2619,7 +2788,11 @@ static enum ggml_status ggml_backend_xdna_graph_compute_single_node(
                     activations,
                     static_cast<size_t>(k),
                     row == 0,
-                    &result[row])) {
+                    &result[row]
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+                    , runtime_trace_node, static_cast<int64_t>(row)
+#endif
+                    )) {
                 std::fprintf(
                     stderr,
                     "ggml_xdna: controlled Q4_K K=2560 MUL_MAT execution failed at row %zu\n",
@@ -2773,6 +2946,11 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
         return GGML_STATUS_SUCCESS;
     }
 
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+    const bool runtime_trace_enabled = ggml_backend_xdna_runtime_trace_enabled();
+    const uint64_t runtime_graph_id = runtime_trace_enabled
+        ? ggml_backend_xdna_runtime_trace_next_graph_id() : 0;
+#endif
     int compute_nodes = 0;
     int view_nodes = 0;
 
@@ -2796,6 +2974,16 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
             ++view_nodes;
             continue;
         }
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+        ggml_backend_xdna_runtime_trace_node trace_node{};
+        const ggml_backend_xdna_runtime_trace_node * trace_node_ptr = nullptr;
+        if (runtime_trace_enabled && node->op == GGML_OP_MUL_MAT && node->src[0] != nullptr &&
+            node->src[1] != nullptr && node->src[0]->type == GGML_TYPE_Q4_K && node->src[0]->ne[0] == 2560) {
+            trace_node = {runtime_graph_id, i, ggml_get_name(node), ggml_op_name(node->op),
+                node->src[0]->ne[1], node->src[0]->ne[0], node->src[1]->ne[1]};
+            trace_node_ptr = &trace_node;
+        }
+#endif
 
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
         if (std::getenv("GGML_XDNA_SPLIT_ORDER_TRACE") != nullptr) {
@@ -2806,6 +2994,9 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
             ggml_backend_xdna_graph_compute_single_node(
                 backend,
                 node
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+, trace_node_ptr
+#endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
 , i
 #endif
@@ -3148,6 +3339,9 @@ static bool ggml_backend_xdna_run_batched_shape(
         const void * q4_rows, size_t q4_rows_bytes, const float * activations,
         size_t activation_elements, float * result, size_t result_bytes,
         const char * node_name, int64_t k, int64_t rhs
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+        , const ggml_backend_xdna_runtime_trace_node * trace_node
+#endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
         , const struct ggml_tensor * node, int graph_node_index, uint64_t causal_sequence_id, bool causal_selected
 #endif
@@ -3158,6 +3352,10 @@ static bool ggml_backend_xdna_run_batched_shape(
     constexpr size_t q8_row_bytes = block_count * sizeof(block_q8_K);
     if (!ctx || !state.available || state.kernel == nullptr || q4_rows == nullptr || activations == nullptr || result == nullptr ||
         q4_rows_bytes != state.rows * q4_native_row_bytes || activation_elements != 2560 || result_bytes != state.rows * sizeof(float)) return false;
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+    uint64_t trace_submission_id = 0;
+    const char * trace_kernel_name = ctx->kernel_name.c_str();
+#endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
     const bool history_capture = ggml_backend_xdna_diagnostic_capture_enabled(ctx);
     uint64_t history_id = 0;
@@ -3259,7 +3457,30 @@ static bool ggml_backend_xdna_run_batched_shape(
             if (history_capture && !ggml_backend_xdna_diagnostic_capture_submitted(ctx, history_id)) return false;
             history_failure_phase = "wait";
 #endif
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+            trace_submission_id = trace_node == nullptr
+                ? 0 : ggml_backend_xdna_runtime_trace_next_submission_id();
+#endif
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+            auto run = [&]() {
+                if (trace_node == nullptr) {
+                    return (*state.kernel)(3u, *state.bo_instr, instruction_count, *state.bo_q4, *state.bo_q8, *state.bo_out);
+                }
+                ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "batched", -1, "KERNEL_CALL_ENTER");
+                try {
+                    return (*state.kernel)(3u, *state.bo_instr, instruction_count, *state.bo_q4, *state.bo_q8, *state.bo_out);
+                } catch (const std::exception & e) {
+                    ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "batched", -1, "KERNEL_CALL_EXCEPTION", nullptr, e.what());
+                    throw;
+                } catch (...) {
+                    ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "batched", -1, "KERNEL_CALL_EXCEPTION", nullptr, "unknown exception");
+                    throw;
+                }
+            }();
+            if (trace_node != nullptr) ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "batched", -1, "KERNEL_CALL_RETURNED");
+#else
             auto run = (*state.kernel)(3u, *state.bo_instr, instruction_count, *state.bo_q4, *state.bo_q8, *state.bo_out);
+#endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             (void) ggml_backend_xdna_causal_capture_event(causal_sequence_id, "KERNEL_CALL_RETURNED");
 #endif
@@ -3277,7 +3498,12 @@ static bool ggml_backend_xdna_run_batched_shape(
             (void) ggml_backend_xdna_causal_capture_event(causal_sequence_id, "WAIT_ENTER");
 #endif
             GGML_XDNA_DIAG_ONLY(++ctx->xrt_runs; ++ctx->run_waits;)
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+            const ert_cmd_state completion_state = ggml_backend_xdna_runtime_trace_wait(
+                trace_node, trace_submission_id, trace_kernel_name, "batched", -1, run, GGML_XDNA_ERT_WAIT_LIMIT);
+#else
             const ert_cmd_state completion_state = ggml_backend_xdna_wait_run(run, GGML_XDNA_ERT_WAIT_LIMIT);
+#endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             (void) ggml_backend_xdna_causal_capture_event(causal_sequence_id, "WAIT_RETURN");
 #endif
@@ -3314,7 +3540,22 @@ static bool ggml_backend_xdna_run_batched_shape(
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             history_failure_phase = "output_sync";
 #endif
-            state.bo_out->sync(XCL_BO_SYNC_BO_FROM_DEVICE); GGML_XDNA_DIAG_ONLY(++ctx->output_from_device;)
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+            if (trace_node != nullptr) {
+                try {
+                    state.bo_out->sync(XCL_BO_SYNC_BO_FROM_DEVICE);
+                } catch (const std::exception & e) {
+                    ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "batched", -1, "OUTPUT_SYNC_EXCEPTION", "ERT_CMD_STATE_COMPLETED", e.what());
+                    throw;
+                } catch (...) {
+                    ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "batched", -1, "OUTPUT_SYNC_EXCEPTION", "ERT_CMD_STATE_COMPLETED", "unknown exception");
+                    throw;
+                }
+                ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "batched", -1, "OUTPUT_SYNC_RETURNED", "ERT_CMD_STATE_COMPLETED");
+            } else
+#endif
+            state.bo_out->sync(XCL_BO_SYNC_BO_FROM_DEVICE);
+            GGML_XDNA_DIAG_ONLY(++ctx->output_from_device;)
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             (void) ggml_backend_xdna_causal_capture_event(causal_sequence_id, "OUTPUT_SYNC_RETURN");
 #endif
@@ -3322,6 +3563,9 @@ static bool ggml_backend_xdna_run_batched_shape(
             if (history_capture && !ggml_backend_xdna_diagnostic_capture_completed(ctx, history_id, state.buf_out, result_bytes)) return false;
 #endif
             std::memcpy(result, state.buf_out, result_bytes);
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+            if (trace_node != nullptr) ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "batched", -1, "RESULT_COPY_DONE", "ERT_CMD_STATE_COMPLETED");
+#endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             (void) ggml_backend_xdna_causal_capture_event(causal_sequence_id, "RESULT_COPY_RETURN");
 #endif
@@ -3444,11 +3688,14 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
         const float * activations,
         size_t activation_elements,
         float * result,
-        size_t result_bytes,
+        size_t result_bytes
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-        const struct ggml_tensor * node, int graph_node_index, uint64_t causal_sequence_id, bool causal_selected,
+        , const struct ggml_tensor * node, int graph_node_index, uint64_t causal_sequence_id, bool causal_selected
 #endif
-        const char * node_name, int64_t k, int64_t rhs) {
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+        , const ggml_backend_xdna_runtime_trace_node * trace_node
+#endif
+        , const char * node_name, int64_t k, int64_t rhs) {
     constexpr size_t rows = 9216;
     constexpr int64_t elements = 2560;
     constexpr size_t block_count = 10;
@@ -3501,6 +3748,10 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
             "ggml_xdna: M=9216 multi-row fast path is not initialized\n");
         return false;
     }
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+    uint64_t trace_submission_id = 0;
+    const char * trace_kernel_name = ctx->kernel_name.c_str();
+#endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
     const char * q4_control_gate_value = std::getenv("GGML_XDNA_DIAG_Q4_ORD7_AT_ORD8");
     const bool q4_control_requested = q4_control_gate_value != nullptr && std::strcmp(q4_control_gate_value, "1") == 0;
@@ -4088,6 +4339,27 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             const uint64_t trace_kernel_start_ns = trace_ordinal8_target ? ggml_backend_xdna_elapsed_ns(ctx) : 0;
 #endif
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+            trace_submission_id = trace_node == nullptr
+                ? 0 : ggml_backend_xdna_runtime_trace_next_submission_id();
+#endif
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+            auto run = [&]() {
+                if (trace_node == nullptr) {
+                    return kernel(opcode, *ctx->q4_m9216_bo_instr, instruction_count, bo_q4, bo_q8, bo_out);
+                }
+                ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "m9216", -1, "KERNEL_CALL_ENTER");
+                try {
+                    return kernel(opcode, *ctx->q4_m9216_bo_instr, instruction_count, bo_q4, bo_q8, bo_out);
+                } catch (const std::exception & e) {
+                    ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "m9216", -1, "KERNEL_CALL_EXCEPTION", nullptr, e.what());
+                    throw;
+                } catch (...) {
+                    ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "m9216", -1, "KERNEL_CALL_EXCEPTION", nullptr, "unknown exception");
+                    throw;
+                }
+            }();
+#else
             auto run = kernel(
                 opcode,
                 *ctx->q4_m9216_bo_instr,
@@ -4095,6 +4367,7 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
                 bo_q4,
                 bo_q8,
                 bo_out);
+#endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             if (trace_ordinal8_target) {
                 const uint64_t trace_kernel_end_ns = ggml_backend_xdna_elapsed_ns(ctx);
@@ -4110,6 +4383,9 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
             ggml_backend_xdna_m9216_correlation_event(
                 submission_sequence_id, "KERNEL_CALL_RETURNED", capture_index, graph_node_index);
             (void) ggml_backend_xdna_causal_capture_event(causal_sequence_id, "KERNEL_CALL_RETURNED");
+#endif
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+            if (trace_node != nullptr) ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "m9216", -1, "KERNEL_CALL_RETURNED");
 #endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             std::fprintf(stderr, "ggml_xdna: M9216_BOUNDARY_AFTER_KERNEL_CALL\n");
@@ -4217,7 +4493,12 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
                 std::fprintf(stderr, "XDNA_TIMED_WAIT ordinal=%llu result=%d timeout=%d\n", static_cast<unsigned long long>(capture_index), static_cast<int>(completion_state), completion_state == ERT_CMD_STATE_TIMEOUT ? 1 : 0);
             }
 #else
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+            const ert_cmd_state completion_state = ggml_backend_xdna_runtime_trace_wait(
+                trace_node, trace_submission_id, trace_kernel_name, "m9216", -1, run, GGML_XDNA_ERT_WAIT_LIMIT);
+#else
             const ert_cmd_state completion_state = ggml_backend_xdna_wait_run(run, GGML_XDNA_ERT_WAIT_LIMIT);
+#endif
 #endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             std::fprintf(stderr, "ggml_xdna: M9216_BOUNDARY_AFTER_WAIT\n");
@@ -4298,6 +4579,20 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
             } else
 #endif
             {
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+                if (trace_node != nullptr) {
+                    try {
+                        bo_out.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
+                    } catch (const std::exception & e) {
+                        ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "m9216", -1, "OUTPUT_SYNC_EXCEPTION", "ERT_CMD_STATE_COMPLETED", e.what());
+                        throw;
+                    } catch (...) {
+                        ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "m9216", -1, "OUTPUT_SYNC_EXCEPTION", "ERT_CMD_STATE_COMPLETED", "unknown exception");
+                        throw;
+                    }
+                    ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "m9216", -1, "OUTPUT_SYNC_RETURNED", "ERT_CMD_STATE_COMPLETED");
+                } else
+#endif
                 bo_out.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
             }
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
@@ -4338,6 +4633,9 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
 #endif
             GGML_XDNA_DIAG_ONLY(++ctx->output_from_device;)
             std::memcpy(result, ctx->q4_m9216_buf_out, output_bytes);
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+            if (trace_node != nullptr) ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "m9216", -1, "RESULT_COPY_DONE", "ERT_CMD_STATE_COMPLETED");
+#endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
             ggml_backend_xdna_m9216_correlation_event(
                 submission_sequence_id, "RESULT_COPY_RETURN", capture_index, graph_node_index);
@@ -4444,7 +4742,11 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560(
         const float * activations,
         size_t activation_elements,
         bool refresh_activation,
-        float * result) {
+        float * result
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+        , const ggml_backend_xdna_runtime_trace_node * trace_node, int64_t row_index
+#endif
+        ) {
     constexpr int64_t elements = 2560;
     constexpr size_t block_count = 10;
     constexpr size_t q4_transport_block_bytes = 152;
@@ -4687,6 +4989,29 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560(
 
         constexpr unsigned int opcode = 3;
 
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+        const uint64_t trace_submission_id = trace_node == nullptr
+            ? 0 : ggml_backend_xdna_runtime_trace_next_submission_id();
+        const char * trace_kernel_name = ctx->kernel_name.c_str();
+#endif
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+        auto run = [&]() {
+            if (trace_node == nullptr) {
+                return kernel(opcode, bo_instr, instruction_count, bo_q4, bo_q8, bo_out);
+            }
+            ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "per_row", row_index, "KERNEL_CALL_ENTER");
+            try {
+                return kernel(opcode, bo_instr, instruction_count, bo_q4, bo_q8, bo_out);
+            } catch (const std::exception & e) {
+                ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "per_row", row_index, "KERNEL_CALL_EXCEPTION", nullptr, e.what());
+                throw;
+            } catch (...) {
+                ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "per_row", row_index, "KERNEL_CALL_EXCEPTION", nullptr, "unknown exception");
+                throw;
+            }
+        }();
+        if (trace_node != nullptr) ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "per_row", row_index, "KERNEL_CALL_RETURNED");
+#else
         auto run = kernel(
             opcode,
             bo_instr,
@@ -4694,18 +5019,40 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560(
             bo_q4,
             bo_q8,
             bo_out);
+#endif
 
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+        const ert_cmd_state completion_state = ggml_backend_xdna_runtime_trace_wait(
+            trace_node, trace_submission_id, trace_kernel_name, "per_row", row_index, run, GGML_XDNA_ERT_WAIT_LIMIT);
+#else
         const ert_cmd_state completion_state = ggml_backend_xdna_wait_run(run, GGML_XDNA_ERT_WAIT_LIMIT);
+#endif
         if (completion_state != ERT_CMD_STATE_COMPLETED) {
             std::fprintf(stderr, "ggml_xdna: ggml_backend_xdna_run_q4k_q8k_k2560 M=1 K=2560 wait_state=%d expected=%d\n",
                          static_cast<int>(completion_state), static_cast<int>(ERT_CMD_STATE_COMPLETED));
             return false;
         }
 
-        bo_out.sync(
-            XCL_BO_SYNC_BO_FROM_DEVICE);
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+        if (trace_node != nullptr) {
+            try {
+                bo_out.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
+            } catch (const std::exception & e) {
+                ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "per_row", row_index, "OUTPUT_SYNC_EXCEPTION", "ERT_CMD_STATE_COMPLETED", e.what());
+                throw;
+            } catch (...) {
+                ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "per_row", row_index, "OUTPUT_SYNC_EXCEPTION", "ERT_CMD_STATE_COMPLETED", "unknown exception");
+                throw;
+            }
+            ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "per_row", row_index, "OUTPUT_SYNC_RETURNED", "ERT_CMD_STATE_COMPLETED");
+        } else
+#endif
+        bo_out.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
 
         *result = *buf_out;
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+        if (trace_node != nullptr) ggml_backend_xdna_runtime_trace_event(*trace_node, trace_submission_id, trace_kernel_name, "per_row", row_index, "RESULT_COPY_DONE", "ERT_CMD_STATE_COMPLETED");
+#endif
 
         return true;
     }
