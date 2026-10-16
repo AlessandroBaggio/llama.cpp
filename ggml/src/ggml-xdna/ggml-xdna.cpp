@@ -2,6 +2,9 @@
 
 #include "ggml-backend-impl.h"
 #include "ggml-quants.h"
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+#include "ggml-impl.h"
+#endif
 #include "ggml-xdna-sha256.h"
 
 #include <xrt/xrt_bo.h>
@@ -74,6 +77,13 @@ static ert_cmd_state ggml_backend_xdna_wait_run(
 struct ggml_backend_xdna_runtime_trace_node {
     uint64_t graph_id;
     int node_index;
+    uint64_t scheduler_graph_id;
+    uint64_t scheduler_split_id;
+    uint64_t scheduler_dispatch_id;
+    int global_node_index;
+    int local_split_node_index;
+    int split_global_node_start;
+    int split_global_node_end_exclusive;
     const char * node_name;
     const char * ggml_op;
     int64_t m;
@@ -90,12 +100,22 @@ static bool ggml_backend_xdna_runtime_trace_enabled() noexcept {
     return value != nullptr && std::strcmp(value, "1") == 0;
 }
 
+static uint64_t ggml_backend_xdna_runtime_trace_allocate_id(std::atomic<uint64_t> & counter) noexcept {
+    uint64_t current = counter.load(std::memory_order_relaxed);
+    while (current != 0 && current != UINT64_MAX) {
+        if (counter.compare_exchange_weak(current, current + 1, std::memory_order_relaxed)) {
+            return current;
+        }
+    }
+    return 0;
+}
+
 static uint64_t ggml_backend_xdna_runtime_trace_next_graph_id() noexcept {
-    return ggml_backend_xdna_runtime_trace_graph_id.fetch_add(1, std::memory_order_relaxed);
+    return ggml_backend_xdna_runtime_trace_allocate_id(ggml_backend_xdna_runtime_trace_graph_id);
 }
 
 static uint64_t ggml_backend_xdna_runtime_trace_next_submission_id() noexcept {
-    return ggml_backend_xdna_runtime_trace_submission_id.fetch_add(1, std::memory_order_relaxed);
+    return ggml_backend_xdna_runtime_trace_allocate_id(ggml_backend_xdna_runtime_trace_submission_id);
 }
 
 static void ggml_backend_xdna_runtime_trace_json_string(std::string & out, const char * value) {
@@ -142,11 +162,81 @@ static void ggml_backend_xdna_runtime_trace_number(
     out.push_back(':');
     out += std::to_string(value);
 }
+static void ggml_backend_xdna_runtime_trace_nullable_number(
+        std::string & out, const char * name, uint64_t value, bool present) {
+    ggml_backend_xdna_runtime_trace_json_string(out, name);
+    out.push_back(':');
+    out += present ? std::to_string(value) : "null";
+}
+
+static void ggml_backend_xdna_scheduler_trace_node_event(
+        const ggml_backend_sched_trace_context * context, uint64_t trace_graph_id,
+        int trace_node_index, const ggml_tensor * node) noexcept {
+    try {
+        std::string line = "{\"schema\":\"ggml-xdna-scheduler-trace-v1\",\"event\":\"XDNA_NODE_EXECUTE\"";
+        const bool joined = context != nullptr;
+        ggml_backend_xdna_runtime_trace_nullable_number(line, "scheduler_graph_id", joined ? context->scheduler_graph_id : 0, joined); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_nullable_number(line, "scheduler_split_id", joined ? context->scheduler_split_id : 0, joined); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_nullable_number(line, "scheduler_dispatch_id", joined ? context->scheduler_dispatch_id : 0, joined); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_nullable_number(line, "global_node_index", joined ? static_cast<uint64_t>(context->global_node_index_base + trace_node_index) : 0, joined); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_nullable_number(line, "local_split_node_index", joined ? static_cast<uint64_t>(context->local_split_node_index_base + trace_node_index) : 0, joined); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_nullable_number(line, "split_global_node_start", joined ? static_cast<uint64_t>(context->split_global_node_start) : 0, joined); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_nullable_number(line, "split_global_node_end_exclusive", joined ? static_cast<uint64_t>(context->split_global_node_end_exclusive) : 0, joined); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_number(line, "trace_graph_id", trace_graph_id); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_number(line, "trace_node_index", static_cast<uint64_t>(trace_node_index)); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_field(line, "node_name", ggml_get_name(node)); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_field(line, "ggml_op", ggml_op_name(node->op)); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_field(line, "backend", "XDNA");
+        line.push_back('}');
+        ggml_backend_sched_trace_emit_json(line.c_str());
+    } catch (...) {
+        // Trace allocation or I/O failure must not change XDNA execution semantics.
+    }
+}
+
+static void ggml_backend_xdna_scheduler_trace_submission_event(
+        const ggml_backend_xdna_runtime_trace_node & node, uint64_t submission_id,
+        const char * kernel_name, const char * path, int64_t row_index) noexcept {
+    try {
+        std::string line = "{\"schema\":\"ggml-xdna-scheduler-trace-v1\",\"event\":\"XDNA_SUBMISSION_LINK\"";
+        const bool joined = node.scheduler_graph_id != 0 && node.scheduler_split_id != 0 && node.scheduler_dispatch_id != 0;
+        ggml_backend_xdna_runtime_trace_nullable_number(line, "scheduler_graph_id", node.scheduler_graph_id, joined); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_nullable_number(line, "scheduler_split_id", node.scheduler_split_id, joined); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_nullable_number(line, "scheduler_dispatch_id", node.scheduler_dispatch_id, joined); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_nullable_number(line, "global_node_index", static_cast<uint64_t>(node.global_node_index), joined); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_nullable_number(line, "local_split_node_index", static_cast<uint64_t>(node.local_split_node_index), joined); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_nullable_number(line, "split_global_node_start", static_cast<uint64_t>(node.split_global_node_start), joined); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_nullable_number(line, "split_global_node_end_exclusive", static_cast<uint64_t>(node.split_global_node_end_exclusive), joined); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_number(line, "trace_graph_id", node.graph_id); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_number(line, "trace_node_index", static_cast<uint64_t>(node.node_index)); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_number(line, "submission_id", submission_id); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_field(line, "node_name", node.node_name); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_field(line, "ggml_op", node.ggml_op); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_field(line, "backend", "XDNA"); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_number(line, "M", static_cast<uint64_t>(node.m)); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_number(line, "K", static_cast<uint64_t>(node.k)); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_number(line, "RHS", static_cast<uint64_t>(node.rhs)); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_field(line, "kernel_name", kernel_name); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_field(line, "path", path); line.push_back(',');
+        ggml_backend_xdna_runtime_trace_nullable_number(line, "row_index", row_index < 0 ? 0 : static_cast<uint64_t>(row_index), row_index >= 0);
+        line.push_back('}');
+        ggml_backend_sched_trace_emit_json(line.c_str());
+    } catch (...) {
+        // Trace allocation or I/O failure must not change XRT execution semantics.
+    }
+}
+
 
 static void ggml_backend_xdna_runtime_trace_event(
         const ggml_backend_xdna_runtime_trace_node & node, uint64_t submission_id,
         const char * kernel_name, const char * path, int64_t row_index,
         const char * event, const char * xrt_state = nullptr, const char * error = nullptr) noexcept {
+    if (node.graph_id == 0 || submission_id == 0) {
+        return;
+    }
+    if (std::strcmp(event, "KERNEL_CALL_ENTER") == 0) {
+        ggml_backend_xdna_scheduler_trace_submission_event(node, submission_id, kernel_name, path, row_index);
+    }
     try {
         std::lock_guard<std::mutex> lock(ggml_backend_xdna_runtime_trace_mutex);
         const uint64_t timestamp = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -2947,9 +3037,19 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
     }
 
 #if defined(GGML_XDNA_RUNTIME_TRACE)
-    const bool runtime_trace_enabled = ggml_backend_xdna_runtime_trace_enabled();
-    const uint64_t runtime_graph_id = runtime_trace_enabled
+    const bool trace_requested = ggml_backend_xdna_runtime_trace_enabled();
+    const uint64_t runtime_graph_id = trace_requested
         ? ggml_backend_xdna_runtime_trace_next_graph_id() : 0;
+    const bool runtime_trace_enabled = trace_requested && runtime_graph_id != 0;
+    ggml_backend_sched_trace_context scheduler_context{};
+    const bool scheduler_context_valid = ggml_backend_sched_trace_context_get(&scheduler_context) &&
+        scheduler_context.node_count == n_nodes &&
+        scheduler_context.global_node_index_base >= scheduler_context.split_global_node_start &&
+        scheduler_context.global_node_index_base + n_nodes <= scheduler_context.split_global_node_end_exclusive &&
+        scheduler_context.local_split_node_index_base >= 0 &&
+        scheduler_context.local_split_node_index_base + n_nodes <=
+            scheduler_context.split_global_node_end_exclusive - scheduler_context.split_global_node_start;
+    const ggml_backend_sched_trace_context * scheduler_context_ptr = scheduler_context_valid ? &scheduler_context : nullptr;
 #endif
     int compute_nodes = 0;
     int view_nodes = 0;
@@ -2979,9 +3079,28 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
         const ggml_backend_xdna_runtime_trace_node * trace_node_ptr = nullptr;
         if (runtime_trace_enabled && node->op == GGML_OP_MUL_MAT && node->src[0] != nullptr &&
             node->src[1] != nullptr && node->src[0]->type == GGML_TYPE_Q4_K && node->src[0]->ne[0] == 2560) {
-            trace_node = {runtime_graph_id, i, ggml_get_name(node), ggml_op_name(node->op),
-                node->src[0]->ne[1], node->src[0]->ne[0], node->src[1]->ne[1]};
+            trace_node.graph_id = runtime_graph_id;
+            trace_node.node_index = i;
+            trace_node.scheduler_graph_id = scheduler_context_valid ? scheduler_context.scheduler_graph_id : 0;
+            trace_node.scheduler_split_id = scheduler_context_valid ? scheduler_context.scheduler_split_id : 0;
+            trace_node.scheduler_dispatch_id = scheduler_context_valid ? scheduler_context.scheduler_dispatch_id : 0;
+            trace_node.global_node_index = scheduler_context_valid
+                ? scheduler_context.global_node_index_base + i : 0;
+            trace_node.local_split_node_index = scheduler_context_valid
+                ? scheduler_context.local_split_node_index_base + i : 0;
+            trace_node.split_global_node_start = scheduler_context_valid ? scheduler_context.split_global_node_start : 0;
+            trace_node.split_global_node_end_exclusive = scheduler_context_valid ? scheduler_context.split_global_node_end_exclusive : 0;
+            trace_node.node_name = ggml_get_name(node);
+            trace_node.ggml_op = ggml_op_name(node->op);
+            trace_node.m = node->src[0]->ne[1];
+            trace_node.k = node->src[0]->ne[0];
+            trace_node.rhs = node->src[1]->ne[1];
             trace_node_ptr = &trace_node;
+        }
+#endif
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+        if (runtime_trace_enabled) {
+            ggml_backend_xdna_scheduler_trace_node_event(scheduler_context_ptr, runtime_graph_id, i, node);
         }
 #endif
 

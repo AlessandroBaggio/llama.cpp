@@ -21,6 +21,12 @@
 #include <string.h>
 #include <algorithm>
 #include <vector>
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+#include <atomic>
+#include <mutex>
+#include <string>
+#include <utility>
+#endif
 
 #ifdef __APPLE__
 #include <sys/types.h>
@@ -29,6 +35,75 @@
 
 
 // backend buffer type
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+namespace {
+std::atomic<uint64_t> ggml_backend_sched_trace_next_id{1};
+std::mutex ggml_backend_sched_trace_mutex;
+thread_local ggml_backend_sched_trace_context ggml_backend_sched_trace_current{};
+
+uint64_t ggml_backend_sched_trace_allocate_id() {
+    uint64_t current = ggml_backend_sched_trace_next_id.load(std::memory_order_relaxed);
+    while (current != 0 && current != UINT64_MAX) {
+        if (ggml_backend_sched_trace_next_id.compare_exchange_weak(
+                current, current + 1, std::memory_order_relaxed)) {
+            return current;
+        }
+    }
+    return 0;
+}
+
+void ggml_backend_sched_trace_json_string(std::string & out, const char * value) {
+    static constexpr char hex[] = "0123456789abcdef";
+    out.push_back('"');
+    if (value != nullptr) {
+        for (const unsigned char * p = reinterpret_cast<const unsigned char *>(value); *p != 0; ++p) {
+            switch (*p) {
+                case '"': out += "\\\""; break;
+                case '\\': out += "\\\\"; break;
+                case '\b': out += "\\b"; break;
+                case '\f': out += "\\f"; break;
+                case '\n': out += "\\n"; break;
+                case '\r': out += "\\r"; break;
+                case '\t': out += "\\t"; break;
+                default:
+                    if (*p < 0x20) {
+                        out += "\\u00";
+                        out.push_back(hex[*p >> 4]);
+                        out.push_back(hex[*p & 0x0f]);
+                    } else {
+                        out.push_back(static_cast<char>(*p));
+                    }
+            }
+        }
+    }
+    out.push_back('"');
+}
+} // namespace
+
+bool ggml_backend_sched_trace_context_get(struct ggml_backend_sched_trace_context * context) {
+    if (context == nullptr) {
+        return false;
+    }
+    *context = ggml_backend_sched_trace_current;
+    return context->scheduler_graph_id != 0 && context->scheduler_split_id != 0 &&
+        context->scheduler_dispatch_id != 0;
+}
+
+void ggml_backend_sched_trace_context_set(const struct ggml_backend_sched_trace_context * context) {
+    ggml_backend_sched_trace_current = context != nullptr
+        ? *context : ggml_backend_sched_trace_context{};
+}
+
+void ggml_backend_sched_trace_emit_json(const char * line) {
+    if (line == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(ggml_backend_sched_trace_mutex);
+    std::fprintf(stderr, "%s\n", line);
+    std::fflush(stderr);
+}
+#endif
+
 
 const char * ggml_backend_buft_name(ggml_backend_buffer_type_t buft) {
     GGML_ASSERT(buft);
@@ -770,6 +845,9 @@ struct ggml_backend_sched_split {
     int inputs_capacity;
     // graph view of this split
     struct ggml_cgraph graph;
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+    uint64_t trace_split_id;
+#endif
 };
 
 struct ggml_backend_sched {
@@ -800,6 +878,9 @@ struct ggml_backend_sched {
     struct ggml_backend_sched_split * splits;
     int n_splits;
     int splits_capacity;
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+    uint64_t trace_graph_id;
+#endif
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
     uint64_t split_generation = 0;
 #endif
@@ -1080,6 +1161,169 @@ static char * fmt_size(size_t size) {
     }
     return buffer;
 }
+
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+static bool ggml_backend_sched_trace_enabled() {
+    const char * value = std::getenv("GGML_XDNA_RUNTIME_TRACE");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
+static void ggml_backend_sched_trace_emit(std::string line) {
+    ggml_backend_sched_trace_emit_json(line.c_str());
+}
+
+static void ggml_backend_sched_trace_assignments(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
+    sched->trace_graph_id = 0;
+    for (int i = 0; i < sched->n_splits; ++i) {
+        sched->splits[i].trace_split_id = 0;
+    }
+    if (!ggml_backend_sched_trace_enabled()) {
+        return;
+    }
+
+    const uint64_t graph_id = ggml_backend_sched_trace_allocate_id();
+    if (graph_id == 0) {
+        return;
+    }
+    for (int i = 0; i < sched->n_splits; ++i) {
+        sched->splits[i].trace_split_id = ggml_backend_sched_trace_allocate_id();
+        if (sched->splits[i].trace_split_id == 0) {
+            for (int j = 0; j < sched->n_splits; ++j) {
+                sched->splits[j].trace_split_id = 0;
+            }
+            return;
+        }
+    }
+    sched->trace_graph_id = graph_id;
+
+    int assignment_count = 0;
+    for (int i = 0; i < graph->n_nodes; ++i) {
+        if (!ggml_is_view_op(graph->nodes[i]->op)) {
+            ++assignment_count;
+        }
+    }
+    std::string line = "{\"schema\":\"ggml-xdna-scheduler-trace-v1\",\"event\":\"SCHEDULER_GRAPH_BEGIN\"";
+    line += ",\"scheduler_graph_id\":" + std::to_string(graph_id);
+    line += ",\"graph_node_count\":" + std::to_string(graph->n_nodes);
+    line += ",\"split_count\":" + std::to_string(sched->n_splits);
+    line += ",\"assignment_count\":" + std::to_string(assignment_count) + "}";
+    ggml_backend_sched_trace_emit(std::move(line));
+
+    for (int i = 0; i < sched->n_splits; ++i) {
+        const struct ggml_backend_sched_split * split = &sched->splits[i];
+        ggml_backend_t backend = sched->backends[split->backend_id];
+        line = "{\"schema\":\"ggml-xdna-scheduler-trace-v1\",\"event\":\"SCHEDULER_SPLIT_ASSIGNMENT\"";
+        line += ",\"scheduler_graph_id\":" + std::to_string(graph_id);
+        line += ",\"scheduler_split_id\":" + std::to_string(split->trace_split_id);
+        line += ",\"split_global_node_start\":" + std::to_string(split->i_start);
+        line += ",\"split_global_node_end_exclusive\":" + std::to_string(split->i_end);
+        line += ",\"backend\":";
+        ggml_backend_sched_trace_json_string(line, backend != nullptr ? ggml_backend_name(backend) : "NULL");
+        line += ",\"input_count\":" + std::to_string(split->n_inputs) + "}";
+        ggml_backend_sched_trace_emit(std::move(line));
+    }
+
+    int cur_split = 0;
+    for (int i = 0; i < graph->n_nodes; ++i) {
+        while (cur_split + 1 < sched->n_splits && i >= sched->splits[cur_split + 1].i_start) {
+            ++cur_split;
+        }
+        struct ggml_tensor * node = graph->nodes[i];
+        if (ggml_is_view_op(node->op)) {
+            continue;
+        }
+        if (cur_split >= sched->n_splits) {
+            return;
+        }
+        const struct ggml_backend_sched_split * split = &sched->splits[cur_split];
+        ggml_backend_t backend = sched->backends[split->backend_id];
+        line = "{\"schema\":\"ggml-xdna-scheduler-trace-v1\",\"event\":\"SCHEDULER_NODE_ASSIGNMENT\"";
+        line += ",\"scheduler_graph_id\":" + std::to_string(graph_id);
+        line += ",\"scheduler_split_id\":" + std::to_string(split->trace_split_id);
+        line += ",\"global_node_index\":" + std::to_string(i);
+        line += ",\"local_split_node_index\":" + std::to_string(i - split->i_start);
+        line += ",\"split_global_node_start\":" + std::to_string(split->i_start);
+        line += ",\"split_global_node_end_exclusive\":" + std::to_string(split->i_end);
+        line += ",\"node_name\":";
+        ggml_backend_sched_trace_json_string(line, ggml_get_name(node));
+        line += ",\"ggml_op\":";
+        ggml_backend_sched_trace_json_string(line, ggml_op_name(node->op));
+        line += ",\"backend\":";
+        ggml_backend_sched_trace_json_string(line, backend != nullptr ? ggml_backend_name(backend) : "NULL");
+        line += "}";
+        ggml_backend_sched_trace_emit(std::move(line));
+    }
+}
+
+struct ggml_backend_sched_trace_context_guard {
+    ggml_backend_sched_trace_context previous{};
+    bool had_previous;
+
+    explicit ggml_backend_sched_trace_context_guard(const ggml_backend_sched_trace_context & next)
+        : had_previous(ggml_backend_sched_trace_context_get(&previous)) {
+        ggml_backend_sched_trace_context_set(&next);
+    }
+
+    ~ggml_backend_sched_trace_context_guard() {
+        ggml_backend_sched_trace_context_set(had_previous ? &previous : nullptr);
+    }
+};
+
+static enum ggml_status ggml_backend_sched_trace_dispatch(
+        ggml_backend_sched_t sched, int split_index, struct ggml_cgraph * graph, int local_node_start) {
+    struct ggml_backend_sched_split * split = &sched->splits[split_index];
+    if (sched->trace_graph_id == 0 || split->trace_split_id == 0 || !ggml_backend_sched_trace_enabled()) {
+        return ggml_backend_graph_compute_async(sched->backends[split->backend_id], graph);
+    }
+    const uint64_t dispatch_id = ggml_backend_sched_trace_allocate_id();
+    if (dispatch_id == 0) {
+        return ggml_backend_graph_compute_async(sched->backends[split->backend_id], graph);
+    }
+
+    const int global_node_start = split->i_start + local_node_start;
+    const int global_node_end = global_node_start + graph->n_nodes;
+    const int local_node_end = local_node_start + graph->n_nodes;
+    ggml_backend_sched_trace_context context = {
+        sched->trace_graph_id, split->trace_split_id, dispatch_id,
+        global_node_start, local_node_start, graph->n_nodes, split->i_start, split->i_end,
+    };
+    struct ggml_backend_sched_trace_context_guard guard(context);
+
+    try {
+        std::string line = "{\"schema\":\"ggml-xdna-scheduler-trace-v1\",\"event\":\"SCHEDULER_SPLIT_DISPATCH\"";
+        line += ",\"scheduler_graph_id\":" + std::to_string(sched->trace_graph_id);
+        line += ",\"scheduler_split_id\":" + std::to_string(split->trace_split_id);
+        line += ",\"scheduler_dispatch_id\":" + std::to_string(dispatch_id);
+        line += ",\"backend\":";
+        ggml_backend_sched_trace_json_string(line, ggml_backend_name(sched->backends[split->backend_id]));
+        line += ",\"split_global_node_start\":" + std::to_string(split->i_start);
+        line += ",\"split_global_node_end_exclusive\":" + std::to_string(split->i_end);
+        line += ",\"dispatch_global_node_start\":" + std::to_string(global_node_start);
+        line += ",\"dispatch_global_node_end_exclusive\":" + std::to_string(global_node_end);
+        line += ",\"dispatch_local_node_start\":" + std::to_string(local_node_start);
+        line += ",\"dispatch_local_node_end_exclusive\":" + std::to_string(local_node_end);
+        line += ",\"input_count\":" + std::to_string(split->n_inputs) + "}";
+        ggml_backend_sched_trace_emit(std::move(line));
+    } catch (...) {
+        // Trace allocation failure must not change scheduler dispatch.
+    }
+
+    const enum ggml_status status = ggml_backend_graph_compute_async(sched->backends[split->backend_id], graph);
+    if (status != GGML_STATUS_SUCCESS) {
+        try {
+            std::string line = "{\"schema\":\"ggml-xdna-scheduler-trace-v1\",\"event\":\"SCHEDULER_DISPATCH_FAILED\"";
+            line += ",\"scheduler_graph_id\":" + std::to_string(sched->trace_graph_id);
+            line += ",\"scheduler_split_id\":" + std::to_string(split->trace_split_id);
+            line += ",\"scheduler_dispatch_id\":" + std::to_string(dispatch_id);
+            line += ",\"status\":" + std::to_string(static_cast<int>(status)) + "}";
+            ggml_backend_sched_trace_emit(std::move(line));
+        } catch (...) {
+            // Trace allocation failure must not change scheduler dispatch.
+        }
+    }
+    return status;
+}
+#endif
 
 static void ggml_backend_sched_print_assignments(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
     int cur_split = 0;
@@ -1884,7 +2128,11 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
         }
 #endif
         if (!sched->callback_eval) {
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+            enum ggml_status ec = ggml_backend_sched_trace_dispatch(sched, split_id, &split->graph, 0);
+#else
             enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph);
+#endif
             if (ec != GGML_STATUS_SUCCESS) {
                 return ec;
             }
@@ -1909,7 +2157,11 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
 
                 struct ggml_cgraph gv = ggml_graph_view(&split->graph, j0, j1 + 1);
 
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+                enum ggml_status ec = ggml_backend_sched_trace_dispatch(sched, split_id, &gv, j0);
+#else
                 enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &gv);
+#endif
                 if (ec != GGML_STATUS_SUCCESS) {
                     return ec;
                 }
@@ -2105,6 +2357,16 @@ bool ggml_backend_sched_alloc_graph(ggml_backend_sched_t sched, struct ggml_cgra
     }
 
     sched->is_alloc = true;
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+    try {
+        ggml_backend_sched_trace_assignments(sched, graph);
+    } catch (...) {
+        sched->trace_graph_id = 0;
+        for (int i = 0; i < sched->n_splits; ++i) {
+            sched->splits[i].trace_split_id = 0;
+        }
+    }
+#endif
 
     return true;
 }

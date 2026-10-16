@@ -173,6 +173,8 @@ def test_contract():
     assert option in cmake
     trace_block = cmake.split("option(GGML_XDNA_RUNTIME_TRACE", 1)[1]
     assert "target_compile_definitions(ggml-xdna PRIVATE GGML_XDNA_RUNTIME_TRACE)" in trace_block
+    assert "target_compile_definitions(ggml-base PRIVATE GGML_XDNA_RUNTIME_TRACE)" in trace_block
+    assert "xdna-scheduler-trace-selftest" in trace_block
     assert "ggml-xdna-diagnostics.cpp" not in trace_block
     assert "ggml-xdna-causal-payload-capture.cpp" not in trace_block
     assert "GGML_BACKEND_DL" not in trace_block
@@ -183,7 +185,7 @@ def test_contract():
         assert path in backend, f"missing execution path: {path}"
     assert "std::atomic<uint64_t> ggml_backend_xdna_runtime_trace_graph_id" in backend
     assert "std::atomic<uint64_t> ggml_backend_xdna_runtime_trace_submission_id" in backend
-    assert "ggml_get_name(node), ggml_op_name(node->op)" in backend
+    assert "trace_node.node_name = ggml_get_name(node);" in backend
     assert '"monotonic_timestamp_ns"' in backend
     fields = set(IDENTITY) | {"schema", "event", "xrt_state", "error", "monotonic_timestamp_ns"}
     assert all(f'"{field}"' in backend for field in fields)

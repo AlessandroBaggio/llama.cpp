@@ -346,6 +346,24 @@ struct ggml_cgraph {
     uint64_t uid;
 };
 
+
+#if defined(GGML_XDNA_RUNTIME_TRACE)
+// Private trace-only bridge between the scheduler in ggml-base and dynamic backends.
+struct ggml_backend_sched_trace_context {
+    uint64_t scheduler_graph_id;
+    uint64_t scheduler_split_id;
+    uint64_t scheduler_dispatch_id;
+    int32_t global_node_index_base;
+    int32_t local_split_node_index_base;
+    int32_t node_count;
+    int32_t split_global_node_start;
+    int32_t split_global_node_end_exclusive;
+};
+
+GGML_API bool ggml_backend_sched_trace_context_get(struct ggml_backend_sched_trace_context * context);
+GGML_API void ggml_backend_sched_trace_context_set(const struct ggml_backend_sched_trace_context * context);
+GGML_API void ggml_backend_sched_trace_emit_json(const char * line);
+#endif
 // returns a slice of cgraph with nodes [i0, i1)
 // the slice does not have leafs or gradients
 // if you need the gradients, get them from the original graph
