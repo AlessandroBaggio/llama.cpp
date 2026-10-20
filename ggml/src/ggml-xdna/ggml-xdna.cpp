@@ -174,6 +174,7 @@ static void ggml_backend_xdna_scheduler_trace_node_event(
         int trace_node_index, const ggml_tensor * node) noexcept {
     try {
         std::string line = "{\"schema\":\"ggml-xdna-scheduler-trace-v1\",\"event\":\"XDNA_NODE_EXECUTE\"";
+        line.push_back(',');
         const bool joined = context != nullptr;
         ggml_backend_xdna_runtime_trace_nullable_number(line, "scheduler_graph_id", joined ? context->scheduler_graph_id : 0, joined); line.push_back(',');
         ggml_backend_xdna_runtime_trace_nullable_number(line, "scheduler_split_id", joined ? context->scheduler_split_id : 0, joined); line.push_back(',');
@@ -199,6 +200,7 @@ static void ggml_backend_xdna_scheduler_trace_submission_event(
         const char * kernel_name, const char * path, int64_t row_index) noexcept {
     try {
         std::string line = "{\"schema\":\"ggml-xdna-scheduler-trace-v1\",\"event\":\"XDNA_SUBMISSION_LINK\"";
+        line.push_back(',');
         const bool joined = node.scheduler_graph_id != 0 && node.scheduler_split_id != 0 && node.scheduler_dispatch_id != 0;
         ggml_backend_xdna_runtime_trace_nullable_number(line, "scheduler_graph_id", node.scheduler_graph_id, joined); line.push_back(',');
         ggml_backend_xdna_runtime_trace_nullable_number(line, "scheduler_split_id", node.scheduler_split_id, joined); line.push_back(',');
@@ -263,8 +265,7 @@ static void ggml_backend_xdna_runtime_trace_event(
         ggml_backend_xdna_runtime_trace_field(line, "error", error); line.push_back(',');
         ggml_backend_xdna_runtime_trace_number(line, "monotonic_timestamp_ns", timestamp);
         line.push_back('}');
-        std::fprintf(stderr, "%s\n", line.c_str());
-        std::fflush(stderr);
+        ggml_backend_sched_trace_emit_json(line.c_str());
     } catch (...) {
         // Trace allocation or I/O failure must not change XRT execution semantics.
     }

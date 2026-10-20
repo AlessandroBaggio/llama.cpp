@@ -99,8 +99,7 @@ void ggml_backend_sched_trace_emit_json(const char * line) {
         return;
     }
     std::lock_guard<std::mutex> lock(ggml_backend_sched_trace_mutex);
-    std::fprintf(stderr, "%s\n", line);
-    std::fflush(stderr);
+    GGML_LOG_CONT("%s\n", line);
 }
 #endif
 
