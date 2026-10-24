@@ -3551,11 +3551,9 @@ static int ggml_backend_xdna_run_gate_up_pair(
             ctx->gate_up_group_q8 = ctx->q4_m9216_kernel->group_id(4);
             ctx->gate_up_group_out = ctx->q4_m9216_kernel->group_id(5);
             ctx->gate_up_bo_instr = std::make_unique<xrt::bo>(device, inst_bytes, XCL_BO_FLAGS_CACHEABLE, ctx->gate_up_group_instr);
-            ctx->gate_up_bo_q4 = std::make_unique<xrt::bo>(device, q4_both, XRT_BO_FLAGS_HOST_ONLY, ctx->gate_up_group_q4);
             ctx->gate_up_bo_q8 = std::make_unique<xrt::bo>(device, q8_bytes, XRT_BO_FLAGS_HOST_ONLY, ctx->gate_up_group_q8);
             ctx->gate_up_bo_out = std::make_unique<xrt::bo>(device, 2 * out_one, XRT_BO_FLAGS_HOST_ONLY, ctx->gate_up_group_out);
             std::memcpy(ctx->gate_up_bo_instr->map<void *>(), ctx->gate_up_instructions.data(), inst_bytes);
-            ctx->gate_up_buf_q4 = ctx->gate_up_bo_q4->map<void *>();
             ctx->gate_up_buf_q8 = ctx->gate_up_bo_q8->map<void *>();
             ctx->gate_up_buf_out = ctx->gate_up_bo_out->map<float *>();
             ggml_backend_xdna_sync_host_written_bo(*ctx->gate_up_bo_instr, "unified Gate/Up instruction BO");

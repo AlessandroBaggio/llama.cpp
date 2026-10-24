@@ -305,9 +305,9 @@ struct ggml_backend_xdna_backend_context {
     bool q4_m9216_available = false;
 
     // Gate/Up stream and BOs reuse the shared M9216 XRT kernel/context.
-    std::unique_ptr<xrt::bo> gate_up_bo_instr, gate_up_bo_q4, gate_up_bo_q8, gate_up_bo_out;
+    std::unique_ptr<xrt::bo> gate_up_bo_instr, gate_up_bo_q8, gate_up_bo_out;
     std::vector<uint32_t> gate_up_instructions;
-    void * gate_up_buf_q4 = nullptr, * gate_up_buf_q8 = nullptr;
+    void * gate_up_buf_q8 = nullptr;
     float * gate_up_buf_out = nullptr;
     uint32_t gate_up_group_instr = 0, gate_up_group_q4 = 0, gate_up_group_q8 = 0, gate_up_group_out = 0;
     bool gate_up_runtime_initialized = false;
