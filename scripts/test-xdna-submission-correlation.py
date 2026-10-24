@@ -14,9 +14,10 @@ EVENTS = (
     "OUTPUT_SYNC_RETURN",
     "RESULT_COPY_RETURN",
 )
+# The generic instruction SHA label is also emitted by production Gate/Up validation.
 CORRELATION_MARKERS = (
     b"XDNA_CORR", *(event.encode("ascii") for event in EVENTS),
-    b"q4_native_sha256", b"q8_sha256", b"instruction_sha256",
+    b"q4_native_sha256", b"q8_sha256",
     b"q4_native_ptr", b"activation_f32_ptr", b"q8_host_ptr",
     b"PROCESS_LOCAL_IDENTITY_ONLY",
  )
@@ -76,9 +77,10 @@ def check_source():
     prepared_call = event_sites[0]
     assert "submission_sequence_id" in body[prepared_call:prepared_call + 220]
 
-    native_hash = body.index("ggml_backend_xdna_m9216_digest(q4_rows, q4_rows_bytes, q4_native_sha)")
-    q4_conversion = body.index("ggml_backend_xdna_q4_cache_apply(", native_hash)
-    assert native_hash < q4_conversion, "Q4 native digest must precede transport conversion"
+    native_skip = body.index('std::snprintf(q4_native_sha, sizeof(q4_native_sha), "SKIPPED");')
+    q4_conversion = body.index("ggml_backend_xdna_q4_cache_apply(")
+    assert native_skip < q4_conversion
+    assert "ggml_backend_xdna_m9216_digest(q4_rows, q4_rows_bytes, q4_native_sha)" not in body, "normal decode must not hash full native Q4 weights"
     q8_conversion = body.index("quantize_row_q8_K_ref(")
     q8_hash = body.index("ggml_backend_xdna_m9216_digest(\n                ctx->q4_m9216_buf_q8")
     q8_sync = body.index('sync_host_written_bo(bo_q8, "K=2560 M=9216 q8 activation')
@@ -93,6 +95,15 @@ def check_source():
     assert "q8_sha256=%s" in source
     assert "instruction_sha256=%s" in source
     assert "identity_scope=PROCESS_LOCAL_IDENTITY_ONLY" in source
+    q4_transport_digest = "if (trace_ordinal8_target) ggml_backend_xdna_m9216_digest(ctx->q4_m9216_buf_q4, q4_transport_bytes, q4_transport_sha);"
+    assert q4_transport_digest in body and diag_guarded(source, source.index(q4_transport_digest))
+    profile_start = source.index("static bool ggml_backend_xdna_profile_preflight(")
+    profile_preflight = source[profile_start:]
+    profile_preflight = profile_preflight[:profile_preflight.index("\nstatic ", 1)]
+    assert "ggml_backend_xdna_hash_file_sha256(runtime_xclbin, digest)" in profile_preflight
+    assert "selected_artifacts->xclbin_sha256" in profile_preflight
+    assert "ggml_backend_xdna_hash_file_sha256(configured, digest)" in profile_preflight
+    assert "selected_artifacts->instruction_sha256[i]" in profile_preflight
     assert "ggml_backend_xdna_diagnostic_capture_payload" not in source[source.index("static void ggml_backend_xdna_m9216_correlation_prepared"):source.index("#endif", source.index("static void ggml_backend_xdna_m9216_correlation_prepared"))]
 
 

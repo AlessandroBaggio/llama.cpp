@@ -23,7 +23,8 @@ end = source.index("\nstatic ", start + 1)
 body = source[start:end]
 
 assert "GGML_XDNA_ERT_WAIT_LIMIT{5000}" in source
-assert source.count("ggml_backend_xdna_wait_run(run, GGML_XDNA_ERT_WAIT_LIMIT)") == 6, "all XRT submission waits must be bounded and abort on timeout"
+# Seven bounded-wait expressions cover the added fused Gate/Up submit path; the M9216 diagnostic and production alternatives are mutually exclusive below.
+assert source.count("ggml_backend_xdna_wait_run(run, GGML_XDNA_ERT_WAIT_LIMIT)") == 7, "all XRT submission waits must be bounded and abort on timeout"
 positions = [body.index(marker) for marker in MARKERS]
 assert positions == sorted(positions), "M9216 boundary markers are out of order"
 lines = body.splitlines()

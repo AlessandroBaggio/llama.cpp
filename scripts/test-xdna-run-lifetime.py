@@ -53,7 +53,8 @@ wait_helper = wait_helper[:wait_helper.index("\nstatic ", 1)]
 assert "state = run.wait(timeout);" in wait_helper
 assert "if (state == ERT_CMD_STATE_TIMEOUT)" in wait_helper
 assert wait_helper.count("run.abort()") == 2
-assert SOURCE.count("ggml_backend_xdna_wait_run(run, GGML_XDNA_ERT_WAIT_LIMIT)") == 6
+# Count source expressions, not runtime waits: Gate/Up adds a path and M9216 has mutually exclusive diagnostic/production branches.
+assert SOURCE.count("ggml_backend_xdna_wait_run(run, GGML_XDNA_ERT_WAIT_LIMIT)") == 7
 assert SOURCE.count("ggml_backend_xdna_wait_run(run, std::chrono::milliseconds(1000))") == 1
 assert "run.reset();" not in SOURCE
 assert DIAGNOSTICS.count("run = std::nullopt;") == 2
