@@ -5,6 +5,7 @@
 // and hardware context at device scope; kernels and BOs remain backend-owned.
 #include "ggml-backend.h"
 #include "ggml-xdna-sha256.h"
+#include "ggml-xdna-q4-profile.h"
 #include <xrt/xrt_bo.h>
 #include <xrt/xrt_device.h>
 #include <xrt/xrt_hw_context.h>
@@ -78,6 +79,8 @@ struct ggml_backend_xdna_context {
     ggml_backend_xdna_kernel_profile active_profile =
         ggml_backend_xdna_kernel_profile::none;
     size_t active_backend_count = 0;
+    ggml_xdna::q4_artifact_profile active_q4_artifact_profile =
+        ggml_xdna::q4_artifact_profile::canonical;
     bool q4_m9216_available = false;
     bool q4_m1024_available = false;
     bool q4_m4096_available = false;
@@ -164,6 +167,8 @@ struct ggml_backend_xdna_backend_context {
 
     ggml_backend_xdna_kernel_profile kernel_profile =
         ggml_backend_xdna_kernel_profile::none;
+    ggml_xdna::q4_artifact_profile q4_artifact_profile =
+        ggml_xdna::q4_artifact_profile::canonical;
 
     bool device_profile_registered = false;
 
@@ -298,6 +303,20 @@ struct ggml_backend_xdna_backend_context {
     uint32_t q4_m9216_instruction_count = 0;
     bool q4_m9216_bos_initialized = false;
     bool q4_m9216_available = false;
+
+    // Gate/Up stream and BOs reuse the shared M9216 XRT kernel/context.
+    std::unique_ptr<xrt::bo> gate_up_bo_instr, gate_up_bo_q4, gate_up_bo_q8, gate_up_bo_out;
+    std::vector<uint32_t> gate_up_instructions;
+    void * gate_up_buf_q4 = nullptr, * gate_up_buf_q8 = nullptr;
+    float * gate_up_buf_out = nullptr;
+    uint32_t gate_up_group_instr = 0, gate_up_group_q4 = 0, gate_up_group_q8 = 0, gate_up_group_out = 0;
+    bool gate_up_runtime_initialized = false;
+    bool gate_up_runtime_attempted = false;
+    struct gate_up_weight_entry { const void * up_rows = nullptr; std::unique_ptr<xrt::bo> bo; };
+    std::unordered_map<const void *, gate_up_weight_entry> gate_up_weight_bos;
+    size_t gate_up_weight_bo_bytes = 0;
+    uint64_t gate_up_pairs_fused = 0;
+    uint64_t gate_up_submissions = 0;
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
     uint64_t m9216_diagnostic_ordinal = 0;
     std::chrono::steady_clock::time_point diagnostics_epoch = std::chrono::steady_clock::now();

@@ -17,8 +17,11 @@
 #include "mtmd.h"
 #include "mtmd-helper.h"
 
+#include "../completion/r6-token-capture.h"
+
 #include <algorithm>
 #include <cstddef>
+#include <cstdlib>
 #include <cinttypes>
 #include <exception>
 #include <memory>
@@ -301,6 +304,7 @@ struct server_slot {
 
     common_sampler_ptr smpl;
 
+    std::unique_ptr<r6_token_capture::writer> token_capture;
     llama_token sampled; // in speculative mode, this is the last accepted token
 
     // for TTS models, this is the embd generated from prev step, decode this to generate next hidden state
@@ -344,6 +348,7 @@ struct server_slot {
 
         task_prev = std::move(task);
         task.reset();
+        token_capture.reset();
 
         // note: callback_on_reset() must have run before this, see release()
         stats = {};
@@ -508,6 +513,17 @@ struct server_slot {
             // do not keep context of the child slots - the parent's context is enough
             if (task->is_child()) {
                 prompt_clear();
+            }
+
+            if (token_capture) {
+                const char * reason = stop == STOP_TYPE_EOS ? "eos" :
+                    stop == STOP_TYPE_WORD ? "antiprompt" :
+                    stop == STOP_TYPE_LIMIT ? (truncated ? "context_full" : "token_limit") : "other";
+                const bool complete = stop != STOP_TYPE_NONE;
+                if (!token_capture->finish(reason, complete, !complete)) {
+                    SLT_WRN(*this, "R6 token capture finalization failed: %s\n", token_capture->error().c_str());
+                }
+                token_capture.reset();
             }
 
             callback_on_reset(*this);
@@ -1714,6 +1730,24 @@ private:
             slot.smpl.reset();
         }
 
+        // Initialize opt-in token capture before transferring task ownership.
+        const char * capture_path = std::getenv("GGML_XDNA_R6_TOKEN_CAPTURE");
+        if (capture_path != nullptr && *capture_path != '\0') {
+            const char * session_id = std::getenv("GGML_XDNA_R6_SESSION_ID");
+            const char * profile = std::getenv("GGML_XDNA_Q4_PROFILE");
+            if (session_id == nullptr || profile == nullptr) {
+                send_error(task, "R6 token capture requires GGML_XDNA_R6_SESSION_ID and GGML_XDNA_Q4_PROFILE");
+                return false;
+            }
+            auto capture = std::make_unique<r6_token_capture::writer>(capture_path, session_id,
+                std::filesystem::path(params_base.model.path).generic_string(), profile, task.n_tokens());
+            if (!capture->ok()) {
+                send_error(task, "R6 token capture initialization failed: " + capture->error());
+                return false;
+            }
+            slot.token_capture = std::move(capture);
+        }
+
         // the per-request limit takes priority over the global one
         slot.n_predict_max = task.params.n_predict != -1 ? task.params.n_predict : params_base.n_predict;
 
@@ -1735,6 +1769,10 @@ private:
         const std::string token_str = result.text_to_send;
         slot.sampled = result.tok;
 
+        if (slot.token_capture && !slot.token_capture->accept(static_cast<int32_t>(result.tok), llama_vocab_is_eog(vocab, result.tok))) {
+            SLT_WRN(slot, "R6 token capture write failed: %s\n", slot.token_capture->error().c_str());
+            slot.token_capture.reset();
+        }
         slot.generated_text += token_str;
         if (slot.task->params.return_tokens) {
             slot.generated_tokens.push_back(result.tok);
@@ -1773,6 +1811,10 @@ private:
             }
 
             slot.add_token(result);
+            if (slot.token_capture && !result.text_to_send.empty() && !slot.token_capture->shown()) {
+                SLT_WRN(slot, "R6 token capture display counter failed: %s\n", slot.token_capture->error().c_str());
+                slot.token_capture.reset();
+            }
             if (slot.task->params.stream) {
                 send_partial_response(slot, result, false);
             }

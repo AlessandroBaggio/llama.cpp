@@ -1030,8 +1030,6 @@ static bool ggml_backend_xdna_parse_init_params(
 
 
 
-static constexpr const char * GGML_XDNA_Q4K_K2560_XCLBIN_SHA256 =
-    "9a743ff724463aa68d2dd62911c73eeeccad414788097ba90fd0bbff3b682d27";
 
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
 static std::string ggml_backend_xdna_xrt_error_code(const char * message) {
@@ -1057,12 +1055,14 @@ static void ggml_backend_xdna_xrt_context_trace(
     }
     const auto * device_context = ctx != nullptr ? ctx->device_context : nullptr;
     std::fprintf(stderr,
-        "XDNA_XRT_CONTEXT backend_id=%llu shape=%s stage=%s operation=%s result=%s device_index=0 device=%p context_count=%zu registrations=%zu xclbin=%p path=%s sha256=%s xclbin_uuid=%s registered_uuid=%s hw_context=%p kernel=%p error_code=%s message=%s\n",
+        "XDNA_XRT_CONTEXT backend_id=%llu shape=%s stage=%s operation=%s result=%s artifact_profile=%s device_index=0 device=%p context_count=%zu registrations=%zu xclbin=%p path=%s sha256=%s xclbin_uuid=%s registered_uuid=%s hw_context=%p kernel=%p error_code=%s message=%s\n",
         static_cast<unsigned long long>(ctx != nullptr ? ctx->backend_instance_id : 0),
         shape != nullptr ? shape : "UNKNOWN",
         stage != nullptr ? stage : "UNKNOWN",
         operation != nullptr ? operation : "UNKNOWN",
         result != nullptr ? result : "UNKNOWN",
+        ctx != nullptr && ggml_xdna::q4_artifacts(ctx->q4_artifact_profile) != nullptr
+            ? ggml_xdna::q4_artifacts(ctx->q4_artifact_profile)->name : "-",
         device_context != nullptr ? static_cast<void *>(device_context->xrt_device.get()) : nullptr,
         resources != nullptr && resources->hw_context != nullptr ? size_t{1} : size_t{0},
         resources != nullptr ? resources->xclbin_registration_count : 0U,
@@ -1098,6 +1098,8 @@ static bool ggml_backend_xdna_acquire_q4_shared_kernel(
         return false;
     }
 
+    const auto * artifact_profile = ggml_xdna::q4_artifacts(ctx->q4_artifact_profile);
+    if (artifact_profile == nullptr) return false;
     auto resources = ctx->device_context->q4_shared;
     std::lock_guard<std::mutex> lock(resources->resource_mutex);
     const char * stage = "SHARED_RESOURCE_VALIDATE";
@@ -1120,7 +1122,7 @@ static bool ggml_backend_xdna_acquire_q4_shared_kernel(
         if (resources->hw_context != nullptr) {
             const bool identity_ok = resources->xclbin != nullptr &&
                 resources->xclbin_path == xclbin_path &&
-                resources->xclbin_sha256 == GGML_XDNA_Q4K_K2560_XCLBIN_SHA256 &&
+                resources->xclbin_sha256 == artifact_profile->xclbin_sha256 &&
                 resources->xclbin->get_uuid().to_string() == resources->xclbin_uuid &&
                 resources->registered_uuid == resources->xclbin_uuid &&
                 resources->xclbin_registration_count == 1 &&
@@ -1150,7 +1152,7 @@ static bool ggml_backend_xdna_acquire_q4_shared_kernel(
                 return fail("SHA256_READ_FAILED", "unable to hash canonical XCLBIN");
             }
             ggml_backend_xdna_format_sha256(digest, actual_sha256);
-            if (std::strcmp(actual_sha256, GGML_XDNA_Q4K_K2560_XCLBIN_SHA256) != 0) {
+            if (std::strcmp(actual_sha256, artifact_profile->xclbin_sha256) != 0) {
                 return fail("SHA256_MISMATCH", "canonical XCLBIN SHA-256 changed before shared registration");
             }
 
@@ -1896,6 +1898,7 @@ bool ggml_backend_xdna_hash_file_sha256(
 static bool
 ggml_backend_xdna_kernel_profile_xclbin_sha256_matches(
         ggml_backend_xdna_kernel_profile profile,
+        ggml_xdna::q4_artifact_profile q4_artifact_profile,
         const unsigned char digest[
             GGML_XDNA_SHA256_DIGEST_SIZE]) {
     static constexpr unsigned char
@@ -1907,15 +1910,6 @@ ggml_backend_xdna_kernel_profile_xclbin_sha256_matches(
         0x89, 0x5a, 0x9f, 0xe0, 0x64, 0x9e, 0x79, 0x33,
     };
 
-    static constexpr unsigned char
-        q4k_q8k_k2560_sha256[
-            GGML_XDNA_SHA256_DIGEST_SIZE] = {
-        // canonical unified multisequence XCLBIN.
-        0x9a, 0x74, 0x3f, 0xf7, 0x24, 0x46, 0x3a, 0xa6,
-        0x8d, 0x2d, 0xd6, 0x29, 0x11, 0xc7, 0x3e, 0xee,
-        0xcc, 0xad, 0x41, 0x47, 0x88, 0x09, 0x7b, 0xa9,
-        0x0f, 0xd0, 0xbb, 0xff, 0x3b, 0x68, 0x2d, 0x27
-    };
 
     // Proven real npu1/AIE2 W2IN block package XCLBIN:
     // 1e06d3f236f5a12bee58d9a7c008431c0f3bd38172d3cab99548ea2174ccaa83
@@ -1939,12 +1933,13 @@ ggml_backend_xdna_kernel_profile_xclbin_sha256_matches(
                 i16_256_sha256,
                 GGML_XDNA_SHA256_DIGEST_SIZE) == 0;
 
-        case ggml_backend_xdna_kernel_profile::q4k_q8k_k2560:
-            return std::memcmp(
-                digest,
-                q4k_q8k_k2560_sha256,
-                GGML_XDNA_SHA256_DIGEST_SIZE) == 0;
-
+        case ggml_backend_xdna_kernel_profile::q4k_q8k_k2560: {
+            const auto * artifacts = ggml_xdna::q4_artifacts(q4_artifact_profile);
+            if (artifacts == nullptr) return false;
+            char actual[GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
+            ggml_backend_xdna_format_sha256(digest, actual);
+            return std::strcmp(actual, artifacts->xclbin_sha256) == 0;
+        }
         case ggml_backend_xdna_kernel_profile::q4k_q8k_w2in_256:
             return std::memcmp(
                 digest,
@@ -1995,37 +1990,28 @@ static bool ggml_backend_xdna_validate_kernel_profile(
         ctx->instructions.size() *
             sizeof(uint32_t));
 
-    if (std::memcmp(
-            actual_instructions,
-            expected_instructions,
-            GGML_XDNA_SHA256_DIGEST_SIZE) != 0) {
-        char actual_hex[
-            GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
-
-        char expected_hex[
-            GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
-
-        ggml_backend_xdna_format_sha256(
-            actual_instructions,
-            actual_hex);
-
-        ggml_backend_xdna_format_sha256(
-            expected_instructions,
-            expected_hex);
-
-        std::fprintf(
-            stderr,
-            "ggml_xdna: instruction fingerprint mismatch "
-            "for profile '%s'\n"
+    char actual_hex[GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
+    ggml_backend_xdna_format_sha256(actual_instructions, actual_hex);
+    const auto * q4_artifacts = ggml_xdna::q4_artifacts(ctx->q4_artifact_profile);
+    const char * expected_q4_instructions = q4_artifacts != nullptr ? q4_artifacts->instruction_sha256[0] : nullptr;
+    const bool instruction_match = ctx->kernel_profile == ggml_backend_xdna_kernel_profile::q4k_q8k_k2560
+        ? expected_q4_instructions != nullptr && std::strcmp(actual_hex, expected_q4_instructions) == 0
+        : std::memcmp(actual_instructions, expected_instructions, GGML_XDNA_SHA256_DIGEST_SIZE) == 0;
+    if (!instruction_match) {
+        char expected_hex[GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
+        if (expected_q4_instructions != nullptr) {
+            std::snprintf(expected_hex, sizeof(expected_hex), "%s", expected_q4_instructions);
+        } else {
+            ggml_backend_xdna_format_sha256(expected_instructions, expected_hex);
+        }
+        std::fprintf(stderr,
+            "ggml_xdna: instruction fingerprint mismatch for profile '%s' (%s)\n"
             "ggml_xdna: expected SHA256: %s\n"
             "ggml_xdna: actual   SHA256: %s\n"
             "ggml_xdna: instruction file: %s\n",
-            ggml_backend_xdna_kernel_profile_name(
-                ctx->kernel_profile),
-            expected_hex,
-            actual_hex,
-            ctx->instructions_path.c_str());
-
+            ggml_backend_xdna_kernel_profile_name(ctx->kernel_profile),
+            q4_artifacts != nullptr ? q4_artifacts->name : "n/a",
+            expected_hex, actual_hex, ctx->instructions_path.c_str());
         return false;
     }
 
@@ -2047,6 +2033,7 @@ static bool ggml_backend_xdna_validate_kernel_profile(
 
     if (!ggml_backend_xdna_kernel_profile_xclbin_sha256_matches(
             ctx->kernel_profile,
+            ctx->q4_artifact_profile,
             actual_xclbin)) {
         char actual_hex[
             GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
@@ -2128,6 +2115,7 @@ static void ggml_backend_xdna_free(ggml_backend_t backend) {
         if (device_ctx->active_backend_count == 0) {
             device_ctx->active_profile =
                 ggml_backend_xdna_kernel_profile::none;
+            device_ctx->active_q4_artifact_profile = ggml_xdna::q4_artifact_profile::canonical;
             device_ctx->q4_m9216_available = false;
             device_ctx->q4_m1024_available = false;
             device_ctx->q4_m4096_available = false;
@@ -2305,17 +2293,9 @@ static void ggml_backend_xdna_m9216_digest(
     ggml_backend_xdna_format_sha256(digest, out);
 }
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
-static constexpr const char * GGML_XDNA_Q4K_CANONICAL_XCLBIN_SHA =
-    "9a743ff724463aa68d2dd62911c73eeeccad414788097ba90fd0bbff3b682d27";
-static constexpr const char * GGML_XDNA_Q4K_CANONICAL_INSTRUCTION_SHAS[] = {
-    "b9504aa178b3412d7adbdb4cdc641892acae90940095a5a6b1357021209a65b8",
-    "9b89a2a63ee7c0c26273a6d25ac6511582769734b48bb9486b56281e1dd78c03",
-    "e093f613fcb230dd12e0674a308d42dde248307e106dbcbc4ff20ba470ceb480",
-    "d8e42a47f2b9e063a77edb513bd15ccc992204bd6e3cf28a519a821f97feee97",
-};
 static constexpr const char * GGML_XDNA_Q4K_INSTRUCTION_ENVS[] = {
     "GGML_XDNA_Q4K_M1024_INSTS", "GGML_XDNA_Q4K_M4096_INSTS",
-    "GGML_XDNA_Q4K_M8192_INSTS", "GGML_XDNA_Q4K_M9216_INSTS",
+    "GGML_XDNA_Q4K_M8192_INSTS", "GGML_XDNA_Q4K_M9216_INSTS", "GGML_XDNA_GATE_UP_INSTS",
 };
 
 static unsigned long ggml_backend_xdna_profile_process_id() {
@@ -2352,9 +2332,12 @@ static const char * ggml_backend_xdna_profile_environment_error(bool allow_host_
 static bool ggml_backend_xdna_profile_preflight(
         const char * resolved_params,
         ggml_backend_xdna_kernel_profile profile,
+        ggml_xdna::q4_artifact_profile q4_artifact_profile,
         const std::string & parsed_xclbin_path,
         bool allow_host_preflight_gate,
         const char ** failure_reason_out) {
+    const auto * selected_artifacts = ggml_xdna::q4_artifacts(q4_artifact_profile);
+    if (selected_artifacts == nullptr) return false;
     const unsigned long pid = ggml_backend_xdna_profile_process_id();
     std::fprintf(stderr, "XDNA_PROFILE_PROFILE_PREFLIGHT_START pid=%lu\n", pid);
     const char * backend_params = std::getenv("GGML_XDNA_BACKEND_PARAMS");
@@ -2386,7 +2369,7 @@ static bool ggml_backend_xdna_profile_preflight(
     if (artifacts_ok) {
         char actual[GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
         ggml_backend_xdna_format_sha256(digest, actual);
-        if (std::strcmp(actual, GGML_XDNA_Q4K_CANONICAL_XCLBIN_SHA) != 0) {
+        if (std::strcmp(actual, selected_artifacts->xclbin_sha256) != 0) {
             artifacts_ok = false;
             artifact_reason = "xclbin_sha256_mismatch";
         }
@@ -2405,10 +2388,24 @@ static bool ggml_backend_xdna_profile_preflight(
         }
         char actual[GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
         ggml_backend_xdna_format_sha256(digest, actual);
-        if (std::strcmp(actual, GGML_XDNA_Q4K_CANONICAL_INSTRUCTION_SHAS[i]) != 0) {
+        if (std::strcmp(actual, selected_artifacts->instruction_sha256[i]) != 0) {
             artifacts_ok = false;
             artifact_reason = "instruction_sha256_mismatch";
             break;
+        }
+    }
+    if (artifacts_ok && selected_artifacts->instruction_sha256[4] != nullptr) {
+        const char * configured = std::getenv("GGML_XDNA_GATE_UP_INSTS");
+        if (configured == nullptr || configured[0] == '\0' || !ggml_backend_xdna_hash_file_sha256(configured, digest)) {
+            artifacts_ok = false;
+            artifact_reason = "GGML_XDNA_GATE_UP_INSTS";
+        } else {
+            char actual[GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
+            ggml_backend_xdna_format_sha256(digest, actual);
+            if (std::strcmp(actual, selected_artifacts->instruction_sha256[4]) != 0) {
+                artifacts_ok = false;
+                artifact_reason = "gate_up_instruction_sha256_mismatch";
+            }
         }
     }
     std::fprintf(stderr, "XDNA_PROFILE_PROFILE_ARTIFACTS_VERIFIED=%s pid=%lu reason=%s\n",
@@ -3018,12 +3015,52 @@ static enum ggml_status ggml_backend_xdna_graph_compute_single_node(
     return GGML_STATUS_SUCCESS;
 }
 
+static bool ggml_backend_xdna_gate_up_names_match(const char * gate_name, const char * up_name) {
+    if (gate_name == nullptr || up_name == nullptr) return false;
+    constexpr const char * gate_prefix = "ffn_gate-";
+    constexpr const char * up_prefix = "ffn_up-";
+    if (std::strncmp(gate_name, gate_prefix, std::strlen(gate_prefix)) != 0 ||
+        std::strncmp(up_name, up_prefix, std::strlen(up_prefix)) != 0) return false;
+    const char * gate_layer = gate_name + std::strlen(gate_prefix);
+    const char * up_layer = up_name + std::strlen(up_prefix);
+    return *gate_layer != '\0' && std::strcmp(gate_layer, up_layer) == 0;
+}
+
+static bool ggml_backend_xdna_gate_up_nodes_eligible(const ggml_tensor * gate, const ggml_tensor * up) {
+    constexpr int64_t k = 2560, m = 9216;
+    if (!gate || !up || gate->op != GGML_OP_MUL_MAT || up->op != GGML_OP_MUL_MAT ||
+        !ggml_backend_xdna_gate_up_names_match(ggml_get_name(gate), ggml_get_name(up)) ||
+        !gate->src[0] || !gate->src[1] || !up->src[0] || !up->src[1] ||
+        gate->src[1] != up->src[1] || gate->src[0] == up->src[0] || gate == up ||
+        gate->data == nullptr || up->data == nullptr || gate->data == up->data ||
+        gate->src[0]->data == nullptr || up->src[0]->data == nullptr || gate->src[1]->data == nullptr ||
+        gate->src[0]->type != GGML_TYPE_Q4_K || up->src[0]->type != GGML_TYPE_Q4_K ||
+        gate->src[1]->type != GGML_TYPE_F32 || gate->type != GGML_TYPE_F32 || up->type != GGML_TYPE_F32 ||
+        gate->src[0]->ne[0] != k || up->src[0]->ne[0] != k ||
+        gate->src[0]->ne[1] != m || up->src[0]->ne[1] != m ||
+        gate->src[1]->ne[0] != k || gate->src[1]->ne[1] != 1 ||
+        gate->ne[0] != m || gate->ne[1] != 1 || up->ne[0] != m || up->ne[1] != 1 ||
+        !ggml_is_contiguous(gate->src[0]) || !ggml_is_contiguous(up->src[0]) ||
+        gate->src[0]->ne[2] != 1 || gate->src[0]->ne[3] != 1 || up->src[0]->ne[2] != 1 || up->src[0]->ne[3] != 1 ||
+        gate->src[1]->ne[2] != 1 || gate->src[1]->ne[3] != 1 || gate->ne[2] != 1 || gate->ne[3] != 1 || up->ne[2] != 1 || up->ne[3] != 1 ||
+        gate->src[0]->nb[1] != 10 * sizeof(block_q4_K) || up->src[0]->nb[1] != 10 * sizeof(block_q4_K) ||
+        gate->src[1]->nb[1] != k * sizeof(float) || gate->nb[0] != sizeof(float) || up->nb[0] != sizeof(float) ||
+        ggml_nbytes(gate->src[0]) != m * 10 * sizeof(block_q4_K) || ggml_nbytes(up->src[0]) != m * 10 * sizeof(block_q4_K) ||
+        ggml_nbytes(gate->src[1]) != k * sizeof(float) || ggml_nbytes(gate) != m * sizeof(float) || ggml_nbytes(up) != m * sizeof(float) ||
+        !ggml_is_contiguous(gate->src[1]) || !ggml_is_contiguous(gate) || !ggml_is_contiguous(up)) return false;
+    return true;
+}
+static int ggml_backend_xdna_run_gate_up_pair(
+        ggml_backend_xdna_backend_context * ctx, const ggml_tensor * gate, const ggml_tensor * up);
+
+
 static enum ggml_status ggml_backend_xdna_graph_compute(
         ggml_backend_t backend,
         struct ggml_cgraph * cgraph) {
     if (backend == nullptr || cgraph == nullptr) {
         return GGML_STATUS_FAILED;
     }
+    auto * ctx = static_cast<ggml_backend_xdna_backend_context *>(backend->context);
 
     const int n_nodes =
         ggml_graph_n_nodes(cgraph);
@@ -3074,6 +3111,25 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
         if (ggml_backend_xdna_is_view_op(node->op)) {
             ++view_nodes;
             continue;
+        }
+        const char * fusion_env = std::getenv("GGML_XDNA_GATE_UP_FUSION");
+        if (fusion_env != nullptr && std::strcmp(fusion_env, "1") == 0 && i + 1 < n_nodes) {
+            struct ggml_tensor * mate = ggml_graph_node(cgraph, i + 1);
+            if (ctx->q4_m9216_available && ggml_backend_xdna_gate_up_nodes_eligible(node, mate)) {
+                const int fused = ggml_backend_xdna_run_gate_up_pair(
+                    static_cast<ggml_backend_xdna_backend_context *>(backend->context), node, mate);
+                if (fused < 0) {
+                    std::fprintf(stderr, "ggml_xdna: Gate/Up pair dispatch failed after submission; no individual replay\n");
+                    return GGML_STATUS_FAILED;
+                }
+                if (fused > 0) {
+                    ++compute_nodes;
+                    GGML_XDNA_DIAG_ONLY(ctx->accepted_q4_nodes += 2;)
+                    ++compute_nodes;
+                    ++i;
+                    continue;
+                }
+            }
         }
 #if defined(GGML_XDNA_RUNTIME_TRACE)
         ggml_backend_xdna_runtime_trace_node trace_node{};
@@ -3143,6 +3199,18 @@ static enum ggml_status ggml_backend_xdna_graph_compute(
         compute_nodes,
         view_nodes);
 #endif
+    const char * fusion_env = std::getenv("GGML_XDNA_GATE_UP_FUSION");
+    if (fusion_env != nullptr && std::strcmp(fusion_env, "1") == 0) {
+        std::fprintf(stderr, "ggml_xdna: Gate/Up fusion ledger pairs=%llu submissions=%llu total_xrt_submissions=%llu ggml_compute_nodes=%d\n",
+            static_cast<unsigned long long>(ctx->gate_up_pairs_fused),
+            static_cast<unsigned long long>(ctx->gate_up_submissions),
+#if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
+            static_cast<unsigned long long>(ctx->xrt_runs),
+#else
+            static_cast<unsigned long long>(ctx->gate_up_submissions),
+#endif
+            compute_nodes);
+    }
 
     return GGML_STATUS_SUCCESS;
 }
@@ -3445,6 +3513,103 @@ static bool ggml_backend_xdna_q4_cache_apply(
     GGML_XDNA_DIAG_ONLY(cache.transport_bytes_copied += transport_bytes;)
 
     return true;
+}
+
+
+static int ggml_backend_xdna_run_gate_up_pair(
+        ggml_backend_xdna_backend_context * ctx, const ggml_tensor * gate, const ggml_tensor * up) {
+    constexpr size_t rows = 9216, k = 2560;
+    constexpr size_t q4_one = rows * 10 * 152, q4_both = 2 * q4_one;
+    constexpr size_t q8_bytes = 10 * sizeof(block_q8_K), out_one = rows * sizeof(float);
+    constexpr size_t inst_bytes = 378228;
+    constexpr uint32_t opcode = 3;
+    constexpr const char * xclbin_sha = "6c8d80d654a981afeea2457d0974086c92b423c1b58a612dc506b62af3f15766";
+    constexpr const char * inst_sha = "0eb1a652b48c4951a30804e975a0788081402b965db828a874969bbfd159705c";
+    if (!ctx || !gate || !up || !ctx->device_context || !ctx->device_context->xrt_device ||
+        !ctx->q4_m9216_available || !ctx->q4_m9216_kernel ||
+        ctx->q4_artifact_profile != ggml_xdna::q4_artifact_profile::prefetch_r2_gate_up) return false;
+    const char * inst_env = std::getenv("GGML_XDNA_GATE_UP_INSTS");
+    if (!inst_env || !*inst_env) return false;
+    if (ctx->gate_up_runtime_attempted && !ctx->gate_up_runtime_initialized) return 0;
+    if (!ctx->gate_up_runtime_initialized) ctx->gate_up_runtime_attempted = true;
+    bool submitted = false;
+    try {
+        if (!ctx->gate_up_runtime_initialized) {
+            unsigned char digest[GGML_XDNA_SHA256_DIGEST_SIZE];
+            char hex[GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
+            if (!ggml_backend_xdna_hash_file_sha256(inst_env, digest)) return false;
+            ggml_backend_xdna_format_sha256(digest, hex);
+            if (std::strcmp(hex, inst_sha) != 0) return false;
+            std::ifstream file(inst_env, std::ios::binary | std::ios::ate);
+            if (!file || file.tellg() != static_cast<std::streamsize>(inst_bytes)) return false;
+            ctx->gate_up_instructions.resize(inst_bytes / sizeof(uint32_t));
+            file.seekg(0);
+            if (!file.read(reinterpret_cast<char *>(ctx->gate_up_instructions.data()), inst_bytes)) return false;
+            auto & device = *ctx->device_context->xrt_device;
+            ctx->gate_up_group_instr = ctx->q4_m9216_kernel->group_id(1);
+            ctx->gate_up_group_q4 = ctx->q4_m9216_kernel->group_id(3);
+            ctx->gate_up_group_q8 = ctx->q4_m9216_kernel->group_id(4);
+            ctx->gate_up_group_out = ctx->q4_m9216_kernel->group_id(5);
+            ctx->gate_up_bo_instr = std::make_unique<xrt::bo>(device, inst_bytes, XCL_BO_FLAGS_CACHEABLE, ctx->gate_up_group_instr);
+            ctx->gate_up_bo_q4 = std::make_unique<xrt::bo>(device, q4_both, XRT_BO_FLAGS_HOST_ONLY, ctx->gate_up_group_q4);
+            ctx->gate_up_bo_q8 = std::make_unique<xrt::bo>(device, q8_bytes, XRT_BO_FLAGS_HOST_ONLY, ctx->gate_up_group_q8);
+            ctx->gate_up_bo_out = std::make_unique<xrt::bo>(device, 2 * out_one, XRT_BO_FLAGS_HOST_ONLY, ctx->gate_up_group_out);
+            std::memcpy(ctx->gate_up_bo_instr->map<void *>(), ctx->gate_up_instructions.data(), inst_bytes);
+            ctx->gate_up_buf_q4 = ctx->gate_up_bo_q4->map<void *>();
+            ctx->gate_up_buf_q8 = ctx->gate_up_bo_q8->map<void *>();
+            ctx->gate_up_buf_out = ctx->gate_up_bo_out->map<float *>();
+            ggml_backend_xdna_sync_host_written_bo(*ctx->gate_up_bo_instr, "unified Gate/Up instruction BO");
+            ctx->gate_up_runtime_initialized = true;
+            std::fprintf(stderr, "ggml_xdna: Gate/Up unified runtime ready xclbin_sha256=%s instruction_sha256=%s groups=%u,%u,%u,%u\n", xclbin_sha, inst_sha, ctx->gate_up_group_instr, ctx->gate_up_group_q4, ctx->gate_up_group_q8, ctx->gate_up_group_out);
+        }
+        const void * gate_rows = gate->src[0]->data;
+        const void * up_rows = up->src[0]->data;
+        auto it = ctx->gate_up_weight_bos.find(gate_rows);
+        xrt::bo * q4bo = nullptr;
+        if (it != ctx->gate_up_weight_bos.end()) {
+            if (it->second.up_rows != up_rows) return false;
+            q4bo = it->second.bo.get();
+        } else {
+            constexpr size_t cache_limit = 2ull * 1024 * 1024 * 1024;
+            if (ctx->gate_up_weight_bo_bytes + q4_both > cache_limit) return false;
+            auto bo = std::make_unique<xrt::bo>(*ctx->device_context->xrt_device, q4_both, XRT_BO_FLAGS_HOST_ONLY, ctx->gate_up_group_q4);
+            auto * mapped = static_cast<uint8_t *>(bo->map<void *>());
+            if (!ggml_backend_xdna_q4_cache_apply(ctx, ggml_backend_xdna_q4_shape::m9216, gate_rows, rows, mapped) ||
+                !ggml_backend_xdna_q4_cache_apply(ctx, ggml_backend_xdna_q4_shape::m9216, up_rows, rows, mapped + q4_one)) return false;
+            ggml_backend_xdna_sync_host_written_bo(*bo, "DEV-22 combined Gate/Up persistent Q4 BO");
+            ggml_backend_xdna_backend_context::gate_up_weight_entry entry;
+            entry.up_rows = up_rows;
+            entry.bo = std::move(bo);
+            it = ctx->gate_up_weight_bos.emplace(gate_rows, std::move(entry)).first;
+            ctx->gate_up_weight_bo_bytes += q4_both;
+            q4bo = it->second.bo.get();
+        }
+        std::vector<block_q8_K> q8(10);
+        std::memset(q8.data(), 0, q8_bytes);
+        quantize_row_q8_K_ref(static_cast<const float *>(gate->src[1]->data), q8.data(), k);
+        std::memcpy(ctx->gate_up_buf_q8, q8.data(), q8_bytes);
+        ggml_backend_xdna_sync_host_written_bo(*ctx->gate_up_bo_q8, "DEV-22 shared Q8 activation BO");
+        GGML_XDNA_DIAG_ONLY(const auto gate_up_submit_start = std::chrono::steady_clock::now();)
+        auto run = (*ctx->q4_m9216_kernel)(opcode, *ctx->gate_up_bo_instr,
+            static_cast<uint32_t>(ctx->gate_up_instructions.size()), *q4bo, *ctx->gate_up_bo_q8, *ctx->gate_up_bo_out);
+        submitted = true;
+        ++ctx->gate_up_submissions;
+        GGML_XDNA_DIAG_ONLY(++ctx->xrt_runs;)
+        const auto state = ggml_backend_xdna_wait_run(run, GGML_XDNA_ERT_WAIT_LIMIT);
+        GGML_XDNA_DIAG_ONLY(++ctx->run_waits;)
+        GGML_XDNA_DIAG_ONLY(ctx->timers.xrt_submit_wait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gate_up_submit_start).count();)
+        if (state != ERT_CMD_STATE_COMPLETED) return -1;
+        GGML_XDNA_DIAG_ONLY(++ctx->run_completed;)
+        ctx->gate_up_bo_out->sync(XCL_BO_SYNC_BO_FROM_DEVICE);
+        std::memcpy(gate->data, ctx->gate_up_buf_out, out_one);
+        std::memcpy(up->data, ctx->gate_up_buf_out + rows, out_one);
+        ++ctx->gate_up_pairs_fused;
+
+        return 1;
+    } catch (const std::exception & e) {
+        std::fprintf(stderr, "ggml_xdna: Gate/Up combined dispatch failed: %s\n", e.what());
+        return submitted ? -1 : 0;
+    }
 }
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
 bool ggml_backend_xdna_diagnostic_convert_q4_native(
@@ -3986,7 +4151,7 @@ static bool ggml_backend_xdna_run_q4k_q8k_k2560_m9216(
     uint64_t trace_kernel_ns = 0, trace_state_query_ns = 0, trace_wait_ns = 0, trace_output_sync_ns = 0;
     const char * trace_offline_pre = "not_taken";
     const char * trace_offline_post = "not_taken";
-    ggml_backend_xdna_m9216_digest(q4_rows, q4_rows_bytes, q4_native_sha);
+    std::snprintf(q4_native_sha, sizeof(q4_native_sha), "SKIPPED");
 #endif
     #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
     static uint64_t trace_sequence_id = 1000000;
@@ -5232,25 +5397,8 @@ ggml_backend_xdna_init_q4k_q8k_k2560_m9216(
         return false;
     }
 
-    // canonical unified multisequence XCLBIN and M9216 instruction stream.
-    static constexpr unsigned char
-        // canonical unified XCLBIN and M9216 instruction fingerprints.
-        expected_xclbin_sha256[
-            GGML_XDNA_SHA256_DIGEST_SIZE] = {
-        0x9a, 0x74, 0x3f, 0xf7, 0x24, 0x46, 0x3a, 0xa6,
-        0x8d, 0x2d, 0xd6, 0x29, 0x11, 0xc7, 0x3e, 0xee,
-        0xcc, 0xad, 0x41, 0x47, 0x88, 0x09, 0x7b, 0xa9,
-        0x0f, 0xd0, 0xbb, 0xff, 0x3b, 0x68, 0x2d, 0x27
-    };
-
-    static constexpr unsigned char
-        expected_instructions_sha256[
-            GGML_XDNA_SHA256_DIGEST_SIZE] = {
-        0xd8, 0xe4, 0x2a, 0x47, 0xf2, 0xb9, 0xe0, 0x63,
-        0xa7, 0x7e, 0xdb, 0x51, 0x3b, 0xd1, 0x5c, 0xcc,
-        0x99, 0x22, 0x04, 0xbd, 0x6e, 0x3c, 0xf2, 0x8a,
-        0x51, 0x9a, 0x82, 0x1f, 0x97, 0xfe, 0xee, 0x97
-    };
+    const auto * artifact_profile = ggml_xdna::q4_artifacts(ctx->q4_artifact_profile);
+    if (artifact_profile == nullptr) return false;
 
     ctx->q4_m9216_xclbin_path =
         xclbin_path;
@@ -5271,25 +5419,12 @@ ggml_backend_xdna_init_q4k_q8k_k2560_m9216(
         return false;
     }
 
-    if (std::memcmp(
-            actual_xclbin,
-            expected_xclbin_sha256,
-            GGML_XDNA_SHA256_DIGEST_SIZE) != 0) {
-        char actual_hex[
-            GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
-
-        ggml_backend_xdna_format_sha256(
-            actual_xclbin,
-            actual_hex);
-
-        std::fprintf(
-            stderr,
-            "ggml_xdna: M=9216 XCLBIN fingerprint mismatch\n"
-            "ggml_xdna: actual SHA256: %s\n"
-            "ggml_xdna: XCLBIN file: %s\n",
-            actual_hex,
-            ctx->q4_m9216_xclbin_path.c_str());
-
+    char actual_xclbin_hex[GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
+    ggml_backend_xdna_format_sha256(actual_xclbin, actual_xclbin_hex);
+    if (std::strcmp(actual_xclbin_hex, artifact_profile->xclbin_sha256) != 0) {
+        std::fprintf(stderr,
+            "ggml_xdna: M=9216 XCLBIN fingerprint mismatch for %s: %s\n",
+            artifact_profile->name, actual_xclbin_hex);
         return false;
     }
 
@@ -5463,6 +5598,19 @@ static ggml_backend_t ggml_backend_xdna_device_init(
 #endif
         return nullptr;
     }
+    ggml_xdna::q4_artifact_profile requested_q4_profile =
+        ggml_xdna::q4_artifact_profile::canonical;
+    const char * q4_profile_env = std::getenv("GGML_XDNA_Q4_PROFILE");
+    if (!ggml_xdna::parse_q4_artifact_profile(q4_profile_env, &requested_q4_profile)) {
+        std::fprintf(stderr, "ggml_xdna: invalid GGML_XDNA_Q4_PROFILE='%s' (expected canonical, prefetch_r2, or prefetch_r2_gate_up)\n",
+            q4_profile_env != nullptr ? q4_profile_env : "<unset>");
+        return nullptr;
+    }
+    if (requested_profile != ggml_backend_xdna_kernel_profile::q4k_q8k_k2560 &&
+        requested_q4_profile != ggml_xdna::q4_artifact_profile::canonical) {
+        std::fprintf(stderr, "ggml_xdna: GGML_XDNA_Q4_PROFILE applies only to profile=q4k_q8k_k2560\n");
+        return nullptr;
+    }
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
     bool profile_preflight_passed = false;
     const char * profile_failure_reason = nullptr;
@@ -5472,7 +5620,7 @@ static ggml_backend_t ggml_backend_xdna_device_init(
         if (host_preflight_host_only) {
             try {
                 profile_preflight_passed = ggml_backend_xdna_profile_preflight(
-                    resolved_params, requested_profile, xclbin_path, host_preflight_host_only, &profile_failure_reason);
+                    resolved_params, requested_profile, requested_q4_profile, xclbin_path, host_preflight_host_only, &profile_failure_reason);
             } catch (const std::exception &) {
                 ggml_backend_xdna_log_host_only_stop(false, "profile_preflight_exception");
                 return nullptr;
@@ -5482,7 +5630,7 @@ static ggml_backend_t ggml_backend_xdna_device_init(
             }
         } else {
             profile_preflight_passed = ggml_backend_xdna_profile_preflight(
-                resolved_params, requested_profile, xclbin_path, host_preflight_host_only, &profile_failure_reason);
+                resolved_params, requested_profile, requested_q4_profile, xclbin_path, host_preflight_host_only, &profile_failure_reason);
         }
         if (host_preflight_host_only) {
             ggml_backend_xdna_log_host_only_stop(
@@ -5513,6 +5661,14 @@ static ggml_backend_t ggml_backend_xdna_device_init(
                 device_ctx->active_profile));
         return nullptr;
     }
+    if (requested_profile == ggml_backend_xdna_kernel_profile::q4k_q8k_k2560 &&
+        device_ctx->active_backend_count != 0 &&
+        !ggml_xdna::q4_profiles_compatible(device_ctx->active_q4_artifact_profile, requested_q4_profile)) {
+        std::fprintf(stderr, "ggml_xdna: cannot mix Q4 artifact profile '%s' with active '%s' on one device\n",
+            ggml_xdna::q4_artifacts(requested_q4_profile)->name,
+            ggml_xdna::q4_artifacts(device_ctx->active_q4_artifact_profile)->name);
+        return nullptr;
+    }
 
     auto * backend_ctx =
         new ggml_backend_xdna_backend_context;
@@ -5522,7 +5678,13 @@ static ggml_backend_t ggml_backend_xdna_device_init(
 
     backend_ctx->device_context = device_ctx;
     backend_ctx->kernel_profile = requested_profile;
+    backend_ctx->q4_artifact_profile = requested_q4_profile;
 
+    if (requested_profile == ggml_backend_xdna_kernel_profile::q4k_q8k_k2560) {
+        const auto * artifacts = ggml_xdna::q4_artifacts(requested_q4_profile);
+        std::fprintf(stderr, "XDNA_Q4_ARTIFACT_PROFILE name=%s xclbin_sha256=%s\n",
+            artifacts->name, artifacts->xclbin_sha256);
+    }
 #if defined(GGML_XDNA_BUILD_DIAGNOSTICS)
     if (profile_preflight_passed) {
         // Keep the preflighted control armed so later gate removal fails closed.
@@ -5574,25 +5736,25 @@ static ggml_backend_t ggml_backend_xdna_device_init(
             delete backend_ctx;
             return nullptr;
         }
-        static constexpr const char * frozen_xclbin_sha =
-            "9a743ff724463aa68d2dd62911c73eeeccad414788097ba90fd0bbff3b682d27";
+        const auto * selected_artifacts = ggml_xdna::q4_artifacts(backend_ctx->q4_artifact_profile);
+        if (selected_artifacts == nullptr) { delete backend_ctx; return nullptr; }
         struct shape_spec {
             size_t rows;
+            size_t artifact_index;
             const char * inst_env;
-            const char * inst_sha;
             ggml_backend_xdna_batched_state ggml_backend_xdna_backend_context::* state;
         };
         const shape_spec shapes[] = {
-            {1024, "GGML_XDNA_Q4K_M1024_INSTS", "b9504aa178b3412d7adbdb4cdc641892acae90940095a5a6b1357021209a65b8", &ggml_backend_xdna_backend_context::q4_m1024},
-            {4096, "GGML_XDNA_Q4K_M4096_INSTS", "9b89a2a63ee7c0c26273a6d25ac6511582769734b48bb9486b56281e1dd78c03", &ggml_backend_xdna_backend_context::q4_m4096},
-            {8192, "GGML_XDNA_Q4K_M8192_INSTS", "e093f613fcb230dd12e0674a308d42dde248307e106dbcbc4ff20ba470ceb480", &ggml_backend_xdna_backend_context::q4_m8192},
+            {1024, 0, "GGML_XDNA_Q4K_M1024_INSTS", &ggml_backend_xdna_backend_context::q4_m1024},
+            {4096, 1, "GGML_XDNA_Q4K_M4096_INSTS", &ggml_backend_xdna_backend_context::q4_m4096},
+            {8192, 2, "GGML_XDNA_Q4K_M8192_INSTS", &ggml_backend_xdna_backend_context::q4_m8192},
         };
         for (const auto & shape : shapes) {
             const char * insts = std::getenv(shape.inst_env);
             if (insts == nullptr || insts[0] == '\0' ||
                 !ggml_backend_xdna_init_batched_shape(
                     backend_ctx, backend_ctx->*shape.state, shape.rows, runtime_xclbin, insts,
-                    frozen_xclbin_sha, shape.inst_sha)) {
+                    selected_artifacts->xclbin_sha256, selected_artifacts->instruction_sha256[shape.artifact_index])) {
                 std::fprintf(stderr, "ggml_xdna: missing or invalid canonical instructions for M=%zu\n", shape.rows);
                 delete backend_ctx;
                 return nullptr;
@@ -5602,10 +5764,27 @@ static ggml_backend_t ggml_backend_xdna_device_init(
         if (insts9216 == nullptr || insts9216[0] == '\0' ||
             !ggml_backend_xdna_init_q4k_q8k_k2560_m9216(
                 backend_ctx, runtime_xclbin, insts9216,
-                "d8e42a47f2b9e063a77edb513bd15ccc992204bd6e3cf28a519a821f97feee97")) {
+                selected_artifacts->instruction_sha256[3])) {
             std::fprintf(stderr, "ggml_xdna: missing or invalid canonical instructions for M=9216\n");
             delete backend_ctx;
             return nullptr;
+        }
+        if (selected_artifacts->instruction_sha256[4] != nullptr) {
+            const char * gate_up_insts = std::getenv("GGML_XDNA_GATE_UP_INSTS");
+            unsigned char digest[GGML_XDNA_SHA256_DIGEST_SIZE];
+            char actual[GGML_XDNA_SHA256_DIGEST_SIZE * 2 + 1];
+            if (gate_up_insts == nullptr || gate_up_insts[0] == '\0' ||
+                !ggml_backend_xdna_hash_file_sha256(gate_up_insts, digest)) {
+                std::fprintf(stderr, "ggml_xdna: missing or unreadable Gate/Up instructions\n");
+                delete backend_ctx;
+                return nullptr;
+            }
+            ggml_backend_xdna_format_sha256(digest, actual);
+            if (std::strcmp(actual, selected_artifacts->instruction_sha256[4]) != 0) {
+                std::fprintf(stderr, "ggml_xdna: Gate/Up instruction fingerprint mismatch\n");
+                delete backend_ctx;
+                return nullptr;
+            }
         }
     }
     if (requested_profile ==
@@ -5621,8 +5800,10 @@ static ggml_backend_t ggml_backend_xdna_device_init(
     }
 #endif
     if (device_ctx->active_backend_count == 0) {
-        device_ctx->active_profile =
-            requested_profile;
+        device_ctx->active_profile = requested_profile;
+        if (requested_profile == ggml_backend_xdna_kernel_profile::q4k_q8k_k2560) {
+            device_ctx->active_q4_artifact_profile = requested_q4_profile;
+        }
     }
 
     ++device_ctx->active_backend_count;

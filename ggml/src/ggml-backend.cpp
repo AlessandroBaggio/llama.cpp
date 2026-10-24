@@ -34,6 +34,7 @@
 #endif
 
 
+
 // backend buffer type
 #if defined(GGML_XDNA_RUNTIME_TRACE)
 namespace {
@@ -1171,6 +1172,14 @@ static void ggml_backend_sched_trace_emit(std::string line) {
     ggml_backend_sched_trace_emit_json(line.c_str());
 }
 
+static const char * ggml_backend_sched_trace_phase_name() {
+    return "UNKNOWN";
+}
+
+static void ggml_backend_sched_trace_add_phase(std::string & line) {
+    line += ",\"phase\":";
+    ggml_backend_sched_trace_json_string(line, ggml_backend_sched_trace_phase_name());
+}
 static void ggml_backend_sched_trace_assignments(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
     sched->trace_graph_id = 0;
     for (int i = 0; i < sched->n_splits; ++i) {
@@ -1205,7 +1214,16 @@ static void ggml_backend_sched_trace_assignments(ggml_backend_sched_t sched, str
     line += ",\"scheduler_graph_id\":" + std::to_string(graph_id);
     line += ",\"graph_node_count\":" + std::to_string(graph->n_nodes);
     line += ",\"split_count\":" + std::to_string(sched->n_splits);
-    line += ",\"assignment_count\":" + std::to_string(assignment_count) + "}";
+    line += ",\"assignment_count\":" + std::to_string(assignment_count);
+    const char * session_id = std::getenv("GGML_XDNA_R6_SESSION_ID");
+    const char * profile = std::getenv("GGML_XDNA_Q4_PROFILE");
+    line += ",\"session_id\":";
+    ggml_backend_sched_trace_json_string(line, session_id != nullptr ? session_id : "");
+    line += ",\"profile\":";
+    ggml_backend_sched_trace_json_string(line, profile != nullptr ? profile : "");
+    line += ",\"state\":\"PLANNED\"";
+    ggml_backend_sched_trace_add_phase(line);
+    line += "}";
     ggml_backend_sched_trace_emit(std::move(line));
 
     for (int i = 0; i < sched->n_splits; ++i) {
@@ -1218,7 +1236,10 @@ static void ggml_backend_sched_trace_assignments(ggml_backend_sched_t sched, str
         line += ",\"split_global_node_end_exclusive\":" + std::to_string(split->i_end);
         line += ",\"backend\":";
         ggml_backend_sched_trace_json_string(line, backend != nullptr ? ggml_backend_name(backend) : "NULL");
-        line += ",\"input_count\":" + std::to_string(split->n_inputs) + "}";
+        line += ",\"input_count\":" + std::to_string(split->n_inputs);
+        line += ",\"state\":\"PLANNED\"";
+        ggml_backend_sched_trace_add_phase(line);
+        line += "}";
         ggml_backend_sched_trace_emit(std::move(line));
     }
 
@@ -1249,6 +1270,13 @@ static void ggml_backend_sched_trace_assignments(ggml_backend_sched_t sched, str
         ggml_backend_sched_trace_json_string(line, ggml_op_name(node->op));
         line += ",\"backend\":";
         ggml_backend_sched_trace_json_string(line, backend != nullptr ? ggml_backend_name(backend) : "NULL");
+        if (node->op == GGML_OP_MUL_MAT && node->src[0] != nullptr && node->src[1] != nullptr) {
+            line += ",\"m\":" + std::to_string(node->src[0]->ne[1]);
+            line += ",\"k\":" + std::to_string(node->src[0]->ne[0]);
+            line += ",\"rhs_cols\":" + std::to_string(node->src[1]->ne[1]);
+        }
+        line += ",\"state\":\"PLANNED\"";
+        ggml_backend_sched_trace_add_phase(line);
         line += "}";
         ggml_backend_sched_trace_emit(std::move(line));
     }
@@ -1301,7 +1329,10 @@ static enum ggml_status ggml_backend_sched_trace_dispatch(
         line += ",\"dispatch_global_node_end_exclusive\":" + std::to_string(global_node_end);
         line += ",\"dispatch_local_node_start\":" + std::to_string(local_node_start);
         line += ",\"dispatch_local_node_end_exclusive\":" + std::to_string(local_node_end);
-        line += ",\"input_count\":" + std::to_string(split->n_inputs) + "}";
+        line += ",\"input_count\":" + std::to_string(split->n_inputs);
+        line += ",\"state\":\"DISPATCH_ATTEMPTED\"";
+        ggml_backend_sched_trace_add_phase(line);
+        line += "}";
         ggml_backend_sched_trace_emit(std::move(line));
     } catch (...) {
         // Trace allocation failure must not change scheduler dispatch.
@@ -1314,7 +1345,47 @@ static enum ggml_status ggml_backend_sched_trace_dispatch(
             line += ",\"scheduler_graph_id\":" + std::to_string(sched->trace_graph_id);
             line += ",\"scheduler_split_id\":" + std::to_string(split->trace_split_id);
             line += ",\"scheduler_dispatch_id\":" + std::to_string(dispatch_id);
-            line += ",\"status\":" + std::to_string(static_cast<int>(status)) + "}";
+            line += ",\"status\":" + std::to_string(static_cast<int>(status));
+            line += ",\"state\":\"FAILED\"";
+            ggml_backend_sched_trace_add_phase(line);
+            line += "}";
+            ggml_backend_sched_trace_emit(std::move(line));
+        } catch (...) {
+            // Trace allocation failure must not change scheduler dispatch.
+        }
+    }
+    if (status == GGML_STATUS_SUCCESS) {
+        try {
+            ggml_backend_t backend = sched->backends[split->backend_id];
+            const char * backend_name = ggml_backend_name(backend);
+            const bool callback_completion_known = backend_name != nullptr &&
+                (std::strcmp(backend_name, "CPU") == 0 || std::strncmp(backend_name, "XDNA", 4) == 0);
+            std::string line = "{\"schema\":\"ggml-xdna-scheduler-trace-v1\",\"event\":\"DISPATCH_ACCEPTED\"";
+            line += ",\"scheduler_graph_id\":" + std::to_string(sched->trace_graph_id);
+            line += ",\"scheduler_split_id\":" + std::to_string(split->trace_split_id);
+            line += ",\"scheduler_dispatch_id\":" + std::to_string(dispatch_id);
+            line += ",\"backend\":";
+            ggml_backend_sched_trace_json_string(line, backend_name);
+            line += ",\"status\":" + std::to_string(static_cast<int>(status));
+            line += ",\"state\":\"DISPATCH_ACCEPTED\"";
+            ggml_backend_sched_trace_add_phase(line);
+            line += "}";
+            ggml_backend_sched_trace_emit(std::move(line));
+
+            line = "{\"schema\":\"ggml-xdna-scheduler-trace-v1\",\"event\":\"";
+            line += callback_completion_known ? "COMPLETION_OBSERVED\"" : "INCONCLUSIVE\"";
+            line += ",\"scheduler_graph_id\":" + std::to_string(sched->trace_graph_id);
+            line += ",\"scheduler_split_id\":" + std::to_string(split->trace_split_id);
+            line += ",\"scheduler_dispatch_id\":" + std::to_string(dispatch_id);
+            line += ",\"backend\":";
+            ggml_backend_sched_trace_json_string(line, backend_name);
+            line += ",\"completion_scope\":\"SPLIT_CALLBACK\",\"graph_node_count\":" + std::to_string(graph->n_nodes);
+            line += ",\"state\":";
+            ggml_backend_sched_trace_json_string(line, callback_completion_known ? "COMPLETION_OBSERVED" : "INCONCLUSIVE");
+            line += ",\"completion_proof\":";
+            ggml_backend_sched_trace_json_string(line, callback_completion_known ? "known synchronous CPU/XDNA callback returned success" : "backend completion contract not classified");
+            ggml_backend_sched_trace_add_phase(line);
+            line += "}";
             ggml_backend_sched_trace_emit(std::move(line));
         } catch (...) {
             // Trace allocation failure must not change scheduler dispatch.

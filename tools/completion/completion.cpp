@@ -5,15 +5,19 @@
 #include "sampling.h"
 #include "llama.h"
 #include "chat.h"
+#include "r6-token-capture.h"
+#include "r6-response-capture.h"
 
 #include <clocale>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <cstdlib>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <memory>
 #include <vector>
 
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
@@ -496,6 +500,7 @@ int llama_completion(int argc, char ** argv) {
 
     bool is_antiprompt = false;
     bool input_echo    = true;
+    std::string token_capture_end_reason;
     bool display       = true;
 
     int n_past             = 0;
@@ -505,6 +510,8 @@ int llama_completion(int argc, char ** argv) {
 
     std::vector<int>   input_tokens;
     std::vector<int>   output_tokens;
+    std::unique_ptr<r6_token_capture::writer> token_capture;
+    std::unique_ptr<r6_response_capture::writer> response_capture;
     std::ostringstream output_ss;
     std::ostringstream assistant_ss; // for storing current assistant message, used in conversation mode
 
@@ -524,11 +531,13 @@ int llama_completion(int argc, char ** argv) {
         }
     }
 
+    const uint64_t prompt_token_count = embd_inp.size();
     if (llama_model_has_encoder(model)) {
         int enc_input_size = embd_inp.size();
         llama_token * enc_input_buf = embd_inp.data();
 
-        if (llama_encode(ctx, llama_batch_get_one(enc_input_buf, enc_input_size))) {
+        const int encode_status = llama_encode(ctx, llama_batch_get_one(enc_input_buf, enc_input_size));
+        if (encode_status) {
             LOG_ERR("%s : failed to eval\n", __func__);
             return 1;
         }
@@ -542,7 +551,44 @@ int llama_completion(int argc, char ** argv) {
         embd_inp.push_back(decoder_start_token_id);
     }
 
+    const char * capture_path = std::getenv("GGML_XDNA_R6_TOKEN_CAPTURE");
+    if (capture_path != nullptr && *capture_path != '\0') {
+        const char * session_id = std::getenv("GGML_XDNA_R6_SESSION_ID");
+        const char * profile = std::getenv("GGML_XDNA_Q4_PROFILE");
+        if (session_id == nullptr || profile == nullptr) {
+            LOG_ERR("R6 token capture requires GGML_XDNA_R6_SESSION_ID and GGML_XDNA_Q4_PROFILE\n");
+            llama_backend_free();
+            return 1;
+        }
+        token_capture = std::make_unique<r6_token_capture::writer>(capture_path, session_id,
+            params.model.path, profile, prompt_token_count);
+        if (!token_capture->ok()) {
+            LOG_ERR("R6 token capture initialization failed: %s\n", token_capture->error().c_str());
+            llama_backend_free();
+            return 1;
+        }
+    }
+
+    const char * response_capture_path = std::getenv("GGML_XDNA_R6_RESPONSE_CAPTURE");
+    if (response_capture_path != nullptr && *response_capture_path != '\0') {
+        const char * session_id = std::getenv("GGML_XDNA_R6_SESSION_ID");
+        const char * profile = std::getenv("GGML_XDNA_Q4_PROFILE");
+        if (!token_capture || session_id == nullptr || profile == nullptr) {
+            LOG_ERR("R6 response capture requires token capture, GGML_XDNA_R6_SESSION_ID and GGML_XDNA_Q4_PROFILE\n");
+            llama_backend_free();
+            return 1;
+        }
+        response_capture = std::make_unique<r6_response_capture::writer>(response_capture_path, session_id, profile);
+        if (!response_capture->ok()) {
+            LOG_ERR("R6 response capture initialization failed: %s\n", response_capture->error().c_str());
+            llama_backend_free();
+            return 1;
+        }
+    }
+
     while ((n_remain != 0 && !is_antiprompt) || params.interactive) {
+        bool sampled_token_this_iteration = false;
+        llama_token sampled_token_id = LLAMA_TOKEN_NULL;
         // predict
         if (!embd.empty()) {
             // Note: (n_ctx - 4) here is to match the logic for commandline prompt handling via
@@ -568,11 +614,13 @@ int llama_completion(int argc, char ** argv) {
                 if (n_past + (int) embd.size() >= n_ctx) {
                     if (!params.ctx_shift){
                         LOG_WRN("\n\n%s: context full and context shift is disabled => stopping\n", __func__);
+                        token_capture_end_reason = "context_full";
                         break;
                     }
 
                     if (params.n_predict == -2) {
                         LOG_WRN("\n\n%s: context full and n_predict == %d => stopping\n", __func__, params.n_predict);
+                        token_capture_end_reason = "context_full";
                         break;
                     }
 
@@ -644,7 +692,10 @@ int llama_completion(int argc, char ** argv) {
                 const bool is_last_batch = (n_consumed >= (int) embd_inp.size());
                 const bool save_now = session_do_save && is_last_batch;
                 session_tokens.insert(session_tokens.end(), embd.begin(), embd.end());
-                if (!common_prompt_batch_decode(ctx, session_tokens, embd.size(), n_past, params.n_batch, path_session, save_now)) {
+                const bool batch_decoded = common_prompt_batch_decode(ctx, session_tokens, embd.size(), n_past, params.n_batch, path_session, save_now);
+                if (!batch_decoded) {
+                    if (token_capture) token_capture->finish("evaluation_error", false, true);
+                    if (response_capture) response_capture->finish(false);
                     return 1;
                 }
                 n_session_consumed += embd.size();
@@ -668,6 +719,14 @@ int llama_completion(int argc, char ** argv) {
             const llama_token id = common_sampler_sample(smpl, ctx, -1);
 
             common_sampler_accept(smpl, id, /* accept_grammar= */ true);
+
+            if (token_capture && !token_capture->accept(static_cast<int32_t>(id), llama_vocab_is_eog(vocab, id))) {
+                LOG_ERR("R6 token capture write failed: %s\n", token_capture->error().c_str());
+                llama_backend_free();
+                return 1;
+            }
+            sampled_token_this_iteration = true;
+            sampled_token_id = id;
 
             // LOG_DBG("last: %s\n", string_from(ctx, smpl->prev.to_vector()).c_str());
 
@@ -709,6 +768,18 @@ int llama_completion(int argc, char ** argv) {
                 // Console/Stream Output
                 LOG("%s", token_str.c_str());
 
+                if (response_capture && token_capture && sampled_token_this_iteration && id == sampled_token_id &&
+                        !response_capture->piece(token_capture->accepted_count() - 1, token_str)) {
+                    LOG_ERR("R6 response capture write failed: %s\n", response_capture->error().c_str());
+                    llama_backend_free();
+                    return 1;
+                }
+
+                if (token_capture && sampled_token_this_iteration && id == sampled_token_id && !token_capture->shown()) {
+                    LOG_ERR("R6 token capture display counter failed: %s\n", token_capture->error().c_str());
+                    llama_backend_free();
+                    return 1;
+                }
                 // Record Displayed Tokens To Log
                 // Note: Generated tokens are created one by one hence this check
                 if (embd.size() > 1) {
@@ -928,6 +999,7 @@ int llama_completion(int argc, char ** argv) {
         // end of generation
         if (!embd.empty() && llama_vocab_is_eog(vocab, embd.back()) && !(params.interactive)) {
             LOG(" [end of text]\n");
+            token_capture_end_reason = "eos";
             break;
         }
 
@@ -936,6 +1008,27 @@ int llama_completion(int argc, char ** argv) {
         if (params.interactive && n_remain <= 0 && params.n_predict >= 0) {
             n_remain = params.n_predict;
             is_interacting = true;
+        }
+    }
+    if (token_capture) {
+        if (token_capture_end_reason.empty()) {
+            token_capture_end_reason = is_antiprompt ? "antiprompt" : n_remain == 0 ? "token_limit" : "other";
+        }
+        const bool normal_end = token_capture_end_reason == "eos" || token_capture_end_reason == "antiprompt" ||
+            token_capture_end_reason == "token_limit" || token_capture_end_reason == "context_full";
+        if (!token_capture->finish(token_capture_end_reason, normal_end)) {
+            LOG_ERR("R6 token capture finalization failed: %s\n", token_capture->error().c_str());
+            llama_backend_free();
+            return 1;
+        }
+    }
+    if (response_capture) {
+        const bool normal_end = token_capture_end_reason == "eos" || token_capture_end_reason == "antiprompt" ||
+            token_capture_end_reason == "token_limit" || token_capture_end_reason == "context_full";
+        if (!response_capture->finish(normal_end)) {
+            LOG_ERR("R6 response capture finalization failed: %s\n", response_capture->error().c_str());
+            llama_backend_free();
+            return 1;
         }
     }
 
